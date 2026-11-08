@@ -103,6 +103,12 @@ connection (100 by default), connections (unlimited by default) and the bytes
 queued per connection (16 MiB). Set `maxConnections` on a server that faces
 untrusted clients.
 
+Health checking: `import nimgrpc/health`, then `let health = newHealth(); srv.register(health)`
+adds the standard `grpc.health.v1.Health` service (`Check`, `Watch`, `List`) to a blocking or a
+chronos server, which is what the native `grpc` probe of Kubernetes, Envoy and
+`grpc_health_probe` call. The server as a whole (name "") is SERVING; `health.setStatus(name,
+hsNotServing)` sets a service; `health.shutdown()` makes everything NOT_SERVING before `stop`.
+
 Cancellation: a handler's thread cannot be interrupted, and `stop` waits for
 handlers to return. Long handlers should therefore notice when their call is
 over (the client cancelled or left, the deadline passed, or the server is

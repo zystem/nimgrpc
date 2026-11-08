@@ -15,7 +15,7 @@ What the project intends to do and not do in the next year. It is a plan of one 
 
 ## Considers (no date)
 
-- Server reflection and health checking services.
+- Server reflection (the health checking service is done: `nimgrpc/health`).
 - Per-call interceptors.
 - HTTP/2 over a unix socket.
 
