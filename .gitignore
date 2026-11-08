@@ -17,3 +17,5 @@ nimcache/
 !/examples/
 !/tools/*.py
 /coverage-out/
+!/tests/interop/gohealth/
+!/tests/interop/*.sh
