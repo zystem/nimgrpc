@@ -25,6 +25,11 @@ export session.Header, session.H2Error, net.Port, tls, common.H2Timeout,
        common.H2StreamClosed, common.Keepalive, common.PingPolicy, common.Limits
 
 type
+  DrainState = enum
+    dsNone      ## serving
+    dsNotice    ## the advisory GOAWAY is out, the final one follows in a moment
+    dsFinal     ## the final GOAWAY is out: calls in progress finish, then the connection closes
+
   StreamState = object
     blocks: seq[seq[Header]]   ## HEADERS blocks received
     inbuf: seq[byte]           ## body bytes received and not yet taken
@@ -63,6 +68,12 @@ type
     lastReadNs: int64     ## monotonic time of the last bytes read
     createdNs: int64      ## monotonic time the connection was made
     handshakeNs: int64    ## server: how long the peer has to send its first SETTINGS; 0 for no limit
+    maxIdleNs: int64      ## server: `Limits.maxConnectionIdleMs` in ns; 0 for no limit
+    ageDueNs: int64       ## server: when the connection is old (monotonic), 0 for never
+    graceNs: int64        ## server: `Limits.maxConnectionAgeGraceMs` in ns; 0 waits for ever
+    activityNs: int64     ## server: when a call last began or ended
+    drain: DrainState
+    drainAtNs: int64      ## when the draining began, then when the grace ends
     pingOutstanding: bool
     pingSentNs: int64
     lastPingRecvNs: int64
@@ -290,6 +301,7 @@ proc dispatchLocked(c: ptr ConnObj; id: int32; headers: seq[Header]) =
   let s = c.server
   c.streamPtr(id).handled = true
   c.lastDispatched = id
+  c.activityNs = nowNs()
   inc c.pending
   acquire(s.jobLock)
   s.jobs.addLast Job(conn: c, id: id, headers: headers)
@@ -447,15 +459,73 @@ proc pingLocked(c: ptr ConnObj): int =
     return int(timeoutNs div 1_000_000) + 1
   c.ka.timeMs                       # idle and not allowed to ping: look again later
 
+const drainNoticeNs = 100_000_000'i64   ## between the advisory GOAWAY and the final one (about a round trip)
+
+proc lifecycleLocked(c: ptr ConnObj): int =
+  ## Server: the age and the idleness of a connection. When it is too old or has had no call for
+  ## too long it is drained: an advisory GOAWAY, the final one a moment later, then the calls in
+  ## progress finish (for up to the grace) and the connection closes. Returns how long to wait
+  ## (ms) before looking again, or -1 when there is nothing to watch.
+  if c.server == nil or c.closed or (c.ageDueNs == 0 and c.maxIdleNs <= 0): return -1
+  let now = nowNs()
+  var wait = int64.high
+  let busy = c.streams.len > 0 or c.pending > 0
+  case c.drain
+  of dsNone:
+    var why = ""
+    if c.ageDueNs > 0:
+      if now >= c.ageDueNs: why = "maximum connection age"
+      else: wait = c.ageDueNs - now
+    if c.maxIdleNs > 0:
+      if busy: c.activityNs = now
+      let idleDue = c.activityNs + c.maxIdleNs
+      if now >= idleDue:
+        if why.len == 0: why = "maximum connection idle time"
+      else: wait = min(wait, idleDue - now)
+    if why.len > 0:
+      try:
+        c.sess.shutdownNotice()
+        c.queueOutputLocked()
+      except CatchableError as e:
+        c.failLocked(e.msg)
+        return -1
+      c.drain = dsNotice
+      c.drainAtNs = now
+      wait = drainNoticeNs
+  of dsNotice:
+    if now >= c.drainAtNs + drainNoticeNs:
+      try:
+        c.sess.goAway()
+        c.queueOutputLocked()
+      except CatchableError as e:
+        c.failLocked(e.msg)
+        return -1
+      c.drain = dsFinal
+      c.drainAtNs = now + c.graceNs         # only read when graceNs > 0
+      wait = 100_000_000'i64
+    else:
+      wait = c.drainAtNs + drainNoticeNs - now
+  of dsFinal:
+    if not busy:
+      c.failLocked("connection drained")
+      return -1
+    if c.graceNs > 0 and now >= c.drainAtNs:
+      c.failLocked("grace of the connection over")
+      return -1
+    wait = 100_000_000'i64                  # the calls may end any moment: look often
+    if c.graceNs > 0: wait = min(wait, c.drainAtNs - now)
+  if wait == int64.high: return -1
+  int(max(wait, 1_000_000'i64) div 1_000_000) + 1
+
 proc keepaliveLocked(c: ptr ConnObj): int =
   ## What the writer does while it has nothing to send: the handshake guard and the PINGs.
   ## Returns how long to wait (ms) before the next look, or -1 for no limit.
-  let hs = c.handshakeLocked()
+  var wait = c.handshakeLocked()
   if c.closed: return -1
-  let ping = c.pingLocked()
-  if hs < 0: ping
-  elif ping < 0: hs
-  else: min(hs, ping)
+  for next in [c.lifecycleLocked(), c.pingLocked()]:
+    if c.closed: return -1
+    if next >= 0 and (wait < 0 or next < wait): wait = next
+  wait
 
 proc writerLoop(c: ptr ConnObj) =
   defer: c.ioDone()
@@ -502,7 +572,7 @@ proc writerLoop(c: ptr ConnObj) =
     discard posix.shutdown(c.sock.getFd, SHUT_RDWR)
 
 proc newConn(sock: Socket; sess: H2Session; server: ptr ServerObj): Conn =
-  result = Conn(sock: sock, sess: sess, server: server, lastReadNs: nowNs(), createdNs: nowNs())
+  result = Conn(sock: sock, sess: sess, server: server, lastReadNs: nowNs(), createdNs: nowNs(), activityNs: nowNs())
   initLock(result.lock)
   initTimedCond(result.cond)
   initTimedCond(result.wcond)
@@ -786,6 +856,7 @@ proc reset*(st: var ServerStream; errorCode = CANCEL) =
 
 proc finishHandlerLocked(c: ptr ConnObj; id: int32) =
   ## The handler for `id` has returned.
+  c.activityNs = nowNs()
   if id in c.streams:
     let s = c.streamPtr(id)
     if not s.outEnded and not s.closed and not c.closed:
@@ -947,6 +1018,12 @@ proc acceptLoop(s: ptr ServerObj) {.thread.} =
         maxConcurrentStreams = s.limits.maxConcurrentStreams), s)
       c.maxBuffer = s.limits.maxConnectionBuffer
       c.handshakeNs = s.limits.handshakeTimeoutMs.int64 * 1_000_000
+      c.maxIdleNs = s.limits.maxConnectionIdleMs.int64 * 1_000_000
+      c.graceNs = s.limits.maxConnectionAgeGraceMs.int64 * 1_000_000
+      if s.limits.maxConnectionAgeMs > 0:
+        # +-10% so that the clients of a restarted server do not all return together
+        let ageNs = s.limits.maxConnectionAgeMs.int64 * 1_000_000
+        c.ageDueNs = c.createdNs + ageNs + ageNs * ((c.createdNs div 1000) mod 21 - 10) div 100
       c.ka = s.ka
       c.policy = s.policy
       if s.tls != nil:
