@@ -3,8 +3,12 @@
 ## Unreleased
 
 ### Added
+- `shutdown(GrpcChannel)`: closes every connection of the channel and frees nothing. Calls in progress, on any thread, fail at once, and new calls are refused. A program whose threads wait in calls can stop them with it, join them, and only then `close` the channel. Safe from any thread and more than once.
 - `nimble coverage` / `tools/coverage.sh`: statement coverage of `src/nimgrpc` from gcov (the Nim compiler's `#line` directives make it report `.nim` lines); 88.8% now, CI fails under 80% (job `tests (coverage, Nim 2.2.12)`). See [docs/building.md](docs/building.md).
 - The builds of this repository honour `CC`, `CFLAGS` and `LDFLAGS` from the environment (added to the flags in use); see [docs/building.md](docs/building.md), which also says how debug information, repeatable builds and installation are handled.
+
+### Fixed
+- `close(GrpcChannel)` from one thread while a call of another thread was waiting in `recv` freed the connection under that call: the call that then failed touched freed memory (found with AddressSanitizer in a program that closed its channel to end its reader thread; the corrupted heap ended in a thread spinning for ever in the allocator). `close` now waits (up to ten seconds) for the calls that are inside a procedure of the library on another thread to leave it, and does not free the channel if one does not. A call that has not entered the library yet cannot be waited for: do not start calls on a channel that is being closed. Test: `tests/tchannelclose.nim`.
 
 ## 0.2.1 — 2026-11-03
 

@@ -10,8 +10,12 @@
 ## When that connection closes or the server sends GOAWAY, the next call
 ## dials a new one; calls still running on the old connection finish there.
 ## A `ClientCall` belongs to one thread and must not outlive its channel.
+## `close` of a channel from another thread while a call waits on it is safe:
+## the call fails with an error and `close` returns once it has left this
+## module (`shutdown` closes the connections without freeing anything, for a
+## caller that wants to join its threads first).
 
-import std/[strutils, locks]
+import std/[strutils, locks, atomics, os]
 import ./status, ./wire, ./h2/blocking, ./compress/gzip, ./cleanup
 export status, blocking.TlsConfig, blocking.tlsClientConfig, blocking.tlsServerConfig,
        blocking.TlsError, blocking.Keepalive, blocking.CipherOrder,
@@ -33,11 +37,13 @@ type
     conn: Conn              ## the connection new calls use
     retired: seq[Conn]      ## replaced connections, closed once idle
     closed: bool
+    inflight: Atomic[int]   ## calls inside a procedure of this module on some thread; `close` waits for them
 
   GrpcChannel* = object
     p*: ptr ChannelObj      ## shared; freed by `close`
 
   ClientCall* = object
+    ch: ptr ChannelObj      ## the channel the call was made on
     st: ClientStream
     msgs: MsgBuf                  ## received bytes not yet decoded
     gotHeaders: bool
@@ -55,6 +61,16 @@ type
     message*: seq[byte]
     headers*: Metadata
     trailers*: Metadata
+
+template inFlight(chan: ptr ChannelObj) =
+  ## The first statement of a procedure that uses a call or the channel: `close` of the channel
+  ## waits until the procedure has returned, so the connection it uses is not freed under it.
+  ## The `defer` is one atomic operation with no `try/except` in it, so an exception on its way out is not lost
+  ## (docs/nim-compiler-notes.md, 1); tests/tchannelclose.nim sees a call that returned instead of raising.
+  let tracked = chan
+  if tracked != nil: discard tracked.inflight.fetchAdd(1)
+  defer:
+    if tracked != nil: discard tracked.inflight.fetchSub(1)
 
 proc connect(c: ptr ChannelObj): Conn =
   var why = ""
@@ -98,15 +114,34 @@ proc dial*(host: string; port: int; tls: TlsConfig = nil; serverName = "";
     raise why
   GrpcChannel(p: c)
 
-proc close*(ch: GrpcChannel) =
-  ## Closes every connection of the channel and frees it. Calls still in
-  ## progress fail; the channel and its copies must not be used afterwards.
+proc shutdown*(ch: GrpcChannel) =
+  ## Closes every connection of the channel and frees nothing: calls in progress, on any thread,
+  ## fail at once with an error, and new calls are refused. Safe to call from any thread, more than
+  ## once; `close` frees the channel afterwards. A thread that waits in a call can be told to
+  ## stop with it, joined, and only then is the channel closed.
   let c = ch.p
   acquire(c.lock)
   c.closed = true
   if c.conn != nil: c.conn.close()
   for r in c.retired: r.close()
   release(c.lock)
+
+const closeWaitMs = 10_000
+
+proc close*(ch: GrpcChannel) =
+  ## Closes every connection of the channel and frees it. Calls still in progress fail; the
+  ## channel and its copies must not be used afterwards. A call that is inside a procedure of this
+  ## module on another thread (it waits in `recv`, say) is let leave it first, for up to ten
+  ## seconds; if one does not, the channel is not freed (it leaks, which a use after free would
+  ## not) and `close` returns. A call that has not entered the module yet cannot be waited for:
+  ## do not start calls on a channel that is being closed.
+  ch.shutdown()
+  let c = ch.p
+  var waited = 0
+  while c.inflight.load > 0 and waited < closeWaitMs:
+    sleep 1
+    inc waited
+  if c.inflight.load > 0: return
   `=destroy`(c[])
   deinitLock(c.lock)
   deallocShared(c)
@@ -144,12 +179,14 @@ proc newCall*(ch: GrpcChannel; path: string; metadata: Metadata = @[];
   if compression notin ["", "identity", "gzip"]:
     raise newGrpcError(scInvalidArgument, "unsupported compression " & compression.escape)
   let c = ch.p
+  inFlight(c)
   var headers = @[(":method", "POST"), (":scheme", c.scheme), (":path", path),
                   (":authority", c.authority), ("content-type", grpcContentType),
                   ("te", "trailers"), ("user-agent", userAgent), acceptEncodingHeader]
   if compression == "gzip": headers.add ("grpc-encoding", "gzip")
   if timeoutMs >= 0: headers.add ("grpc-timeout", encodeTimeout(timeoutMs))
   headers.add metadata.toWire
+  result.ch = c
   result.maxMessage = maxMessage
   result.gzipOut = compression == "gzip"
   var why = ""
@@ -173,10 +210,12 @@ proc newCall*(ch: GrpcChannel; path: string; metadata: Metadata = @[];
 
 proc close*(call: var ClientCall) =
   ## Releases the stream; an unfinished call is cancelled.
+  inFlight(call.ch)
   call.st.release()
 
 proc cancel*(call: var ClientCall) =
   ## Resets the call; later `send` and `recv` raise CANCELLED.
+  inFlight(call.ch)
   if not call.ended:
     call.st.cancel()
     call.cancelled = true
@@ -262,6 +301,7 @@ proc send*(call: var ClientCall; msg: openArray[byte]; compressed: bool) =
   ## Sends one message, compressed or not. Compressing needs a call opened
   ## with `compression = "gzip"`. If the server has already ended the call,
   ## raises its status (GrpcError).
+  inFlight(call.ch)
   if call.cancelled: raise newGrpcError(scCancelled, "call cancelled")
   if call.ended: raise newGrpcError(scInternal, "send after the call ended")
   if compressed and not call.gzipOut:
@@ -280,6 +320,7 @@ proc send*(call: var ClientCall; msg: openArray[byte]) =
 
 proc closeSend*(call: var ClientCall) =
   ## No more messages from the client.
+  inFlight(call.ch)
   if call.ended: return
   call.mapErrors:
     call.st.closeSend()
@@ -287,6 +328,7 @@ proc closeSend*(call: var ClientCall) =
 proc recv*(call: var ClientCall; msg: var seq[byte]): bool =
   ## The next message from the server; false once the server has ended the
   ## call with OK. Any other status is raised as GrpcError.
+  inFlight(call.ch)
   if call.cancelled: raise newGrpcError(scCancelled, "call cancelled")
   if call.ended: return false
   call.mapErrors:
@@ -326,6 +368,7 @@ proc unaryCall*(ch: GrpcChannel; path: string; request: openArray[byte];
                 maxMessage = defaultMaxMessage; compression = ""): UnaryResult =
   ## Sends one message and returns the one reply. Raises GrpcError for any
   ## status other than OK.
+  inFlight(ch.p)
   var call = ch.newCall(path, metadata, timeoutMs, maxMessage, compression)
   var res: UnaryResult
   withCleanup:
