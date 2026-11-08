@@ -19,7 +19,7 @@
 ## count is touched from two threads.
 
 import std/[locks, net, tables, deques, os, posix, atomics]
-import ./session, ./common, ../tls/tls, ../cleanup, ../bytebuf
+import ./session, ./common, ./tcpopts, ../tls/tls, ../cleanup, ../bytebuf
 
 export session.Header, session.H2Error, net.Port, tls, common.H2Timeout,
        common.H2StreamClosed, common.Keepalive, common.PingPolicy, common.Limits
@@ -61,6 +61,8 @@ type
     ka: Keepalive
     policy: PingPolicy
     lastReadNs: int64     ## monotonic time of the last bytes read
+    createdNs: int64      ## monotonic time the connection was made
+    handshakeNs: int64    ## server: how long the peer has to send its first SETTINGS; 0 for no limit
     pingOutstanding: bool
     pingSentNs: int64
     lastPingRecvNs: int64
@@ -388,7 +390,18 @@ proc readerLoop(c: ptr ConnObj) =
       release(c.lock)
       if stop: break
 
-proc keepaliveLocked(c: ptr ConnObj): int =
+proc handshakeLocked(c: ptr ConnObj): int =
+  ## Server: closes a connection whose peer has not sent its first SETTINGS (the TLS handshake
+  ## and the HTTP/2 preface are behind that) in time. Returns how long to wait (ms) before
+  ## looking again, or -1 when there is nothing to watch.
+  if c.server == nil or c.handshakeNs <= 0 or c.closed or c.sess.gotPeerSettings: return -1
+  let left = c.createdNs + c.handshakeNs - nowNs()
+  if left <= 0:
+    c.failLocked("handshake not completed in " & $(c.handshakeNs div 1_000_000) & " ms")
+    return -1
+  int(left div 1_000_000) + 1
+
+proc pingLocked(c: ptr ConnObj): int =
   ## Sends a due PING or closes a connection whose PING went unanswered.
   ## Returns how long to wait (ms) before checking again, or -1 for no limit.
   if c.ka.timeMs <= 0 or c.closed: return -1
@@ -415,6 +428,16 @@ proc keepaliveLocked(c: ptr ConnObj): int =
       return -1
     return int(timeoutNs div 1_000_000) + 1
   c.ka.timeMs                       # idle and not allowed to ping: look again later
+
+proc keepaliveLocked(c: ptr ConnObj): int =
+  ## What the writer does while it has nothing to send: the handshake guard and the PINGs.
+  ## Returns how long to wait (ms) before the next look, or -1 for no limit.
+  let hs = c.handshakeLocked()
+  if c.closed: return -1
+  let ping = c.pingLocked()
+  if hs < 0: ping
+  elif ping < 0: hs
+  else: min(hs, ping)
 
 proc writerLoop(c: ptr ConnObj) =
   defer: c.ioDone()
@@ -461,7 +484,7 @@ proc writerLoop(c: ptr ConnObj) =
     discard posix.shutdown(c.sock.getFd, SHUT_RDWR)
 
 proc newConn(sock: Socket; sess: H2Session; server: ptr ServerObj): Conn =
-  result = Conn(sock: sock, sess: sess, server: server, lastReadNs: nowNs())
+  result = Conn(sock: sock, sess: sess, server: server, lastReadNs: nowNs(), createdNs: nowNs())
   initLock(result.lock)
   initCond(result.cond)
   initCond(result.wcond)
@@ -860,6 +883,7 @@ proc acceptLoop(s: ptr ServerObj) {.thread.} =
         client.close()
         break
       client.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
+      setTcpKeepalive(client.getFd, s.ka.tcpSecs)
       s.reap()
       if s.limits.maxConnections > 0 and s.conns.len >= s.limits.maxConnections:
         client.close()                 # over the limit: the peer sees a closed connection
@@ -867,6 +891,7 @@ proc acceptLoop(s: ptr ServerObj) {.thread.} =
       let c = newConn(client, newServerSession(
         maxConcurrentStreams = s.limits.maxConcurrentStreams), s)
       c.maxBuffer = s.limits.maxConnectionBuffer
+      c.handshakeNs = s.limits.handshakeTimeoutMs.int64 * 1_000_000
       c.ka = s.ka
       c.policy = s.policy
       if s.tls != nil:
@@ -974,6 +999,7 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   except CatchableError as e:
     sock.close()              # a socket that never connected must not keep its descriptor
     raise e
+  setTcpKeepalive(sock.getFd, keepalive.tcpSecs)
   result = newConn(sock, newClientSession(), nil)
   result.ka = keepalive
   if tls != nil:

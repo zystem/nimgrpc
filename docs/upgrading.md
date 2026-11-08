@@ -6,6 +6,8 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 ## Unreleased
 
+- **Handshake limit and TCP keepalive**: a server now closes a connection that has not completed the TLS handshake and sent its HTTP/2 preface and first SETTINGS within two minutes (`Limits.handshakeTimeoutMs`; 0 turns it off), and every connection gets the system's TCP keepalive after 15 seconds of silence (`Keepalive.tcpSecs`; 0 turns it off). A client that is slower than two minutes to start talking must raise the limit.
+
 ## 0.2.1
 
 - **Limits, first burst (0.2.0)**: a server refuses (REFUSED_STREAM, which the clients of this library report as UNAVAILABLE; it is safe to retry, the call did not run) the calls over `maxConcurrentStreams` that arrive in the first flight of a connection, before the client has read the server's SETTINGS; once SETTINGS are in, nghttp2 holds the excess back by itself. A client that opens more than the limit of calls at once on a connection it has just made should retry such a call, send one call first, or the server should raise the limit.

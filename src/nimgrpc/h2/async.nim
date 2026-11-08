@@ -16,7 +16,7 @@
 
 import std/[tables, deques]
 import pkg/chronos
-import ./session, ./common, ../tls/tls, ../bytebuf
+import ./session, ./common, ./tcpopts, ../tls/tls, ../bytebuf
 
 export session.Header, session.H2Error, tls, common.H2Timeout,
        common.H2StreamClosed, common.Keepalive, common.PingPolicy, common.Limits
@@ -68,12 +68,14 @@ type
     ka: Keepalive
     policy: PingPolicy
     lastRead: Moment
+    created: Moment
+    handshakeMs: int           ## server: how long the peer has to send its first SETTINGS; 0 for no limit
     pingOutstanding: bool
     pingSent: Moment
     lastPingRecv: Moment
     pingStrikes: int
     goawayReceived: bool
-    readerF, writerF, pingerF: Task
+    readerF, writerF, pingerF, guardF: Task
 
   AsyncStreamHandler* = proc (st: AsyncH2Stream; userData: pointer): Future[void]
     {.gcsafe, raises: [].}
@@ -378,17 +380,31 @@ proc pingerLoop(c: AsyncH2Conn) {.async: (raises: []).} =
     except CancelledError:
       break
 
+proc handshakeGuard(c: AsyncH2Conn) {.async: (raises: []).} =
+  ## Server: closes a connection whose peer has not sent its first SETTINGS (the TLS handshake
+  ## and the HTTP/2 preface are behind that) within `handshakeMs`.
+  let limit = c.created + c.handshakeMs.milliseconds
+  while not c.closed and not c.sess.gotPeerSettings:
+    if Moment.now() >= limit:
+      c.fail("handshake not completed in " & $c.handshakeMs & " ms")
+      break
+    try:
+      await sleepAsync(100.milliseconds)
+    except CancelledError:
+      break
+
 proc newConn(transp: StreamTransport; sess: H2Session; server: AsyncH2Server;
              ka: Keepalive): AsyncH2Conn =
   AsyncH2Conn(transp: transp, sess: sess, server: server, ka: ka,
               outQ: initDeque[seq[byte]](), writeEv: newAsyncEvent(),
-              closedEv: newAsyncEvent(), lastRead: Moment.now())
+              closedEv: newAsyncEvent(), lastRead: Moment.now(), created: Moment.now())
 
 proc start(c: AsyncH2Conn) =
   c.queueOutput()             # client preface / SETTINGS
   c.readerF = c.readerLoop()
   c.writerF = c.writerLoop()
   if c.ka.timeMs > 0: c.pingerF = c.pingerLoop()
+  if c.handshakeMs > 0: c.guardF = c.handshakeGuard()
 
 proc shutdown(c: AsyncH2Conn) {.async: (raises: []).} =
   ## Sends GOAWAY (and TLS close_notify), closes the connection and waits
@@ -405,6 +421,7 @@ proc shutdown(c: AsyncH2Conn) {.async: (raises: []).} =
   if c.writerF != nil: await noCancel c.writerF
   if c.readerF != nil: await noCancel c.readerF
   if c.pingerF != nil: await noCancel c.pingerF
+  if c.guardF != nil: await noCancel c.guardF
 
 # ------------------------------------------------------------ streams
 
@@ -629,6 +646,7 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
     except CatchableError as e:
       lastErr = e
   if transp == nil: raise lastErr
+  setTcpKeepalive(cint(transp.fd), keepalive.tcpSecs)
   let c = newConn(transp, newClientSession(manualFlow = true), nil, keepalive)
   if tls != nil:
     c.tlsConf = tls
@@ -725,7 +743,9 @@ proc newAsyncStreamServer*(handler: AsyncStreamHandler; userData: pointer = nil;
       c = newConn(transp, newServerSession(
         manualFlow = true, maxConcurrentStreams = s.limits.maxConcurrentStreams), s, s.ka)
       c.maxBuffer = s.limits.maxConnectionBuffer
+      c.handshakeMs = s.limits.handshakeTimeoutMs
       c.policy = s.policy
+      setTcpKeepalive(cint(transp.fd), s.ka.tcpSecs)
       if s.tls != nil: c.tls = newServerTls(s.tls)
     except CatchableError:
       await transp.closeWait()

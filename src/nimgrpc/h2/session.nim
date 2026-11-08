@@ -59,6 +59,7 @@ type
     inData: Table[int32, seq[byte]]
     outs: Table[int32, OutStream]
     queued: int        ## body bytes in `outs` that nghttp2 has not framed yet
+    peerSettings: bool ## the peer's first SETTINGS frame has arrived: its preface is done
     failure: string    ## first error seen inside a callback
   H2Session* = ref H2SessionObj
 
@@ -115,6 +116,8 @@ proc onFrameRecv(session: ptr Nghttp2Session; frame: ptr Nghttp2Frame;
   let id = frame.hd.stream_id
   let endStream = (frame.hd.flags and NGHTTP2_FLAG_END_STREAM) != 0
   case frame.hd.`type`
+  of NGHTTP2_SETTINGS:
+    if (frame.hd.flags and NGHTTP2_FLAG_ACK) == 0: s.peerSettings = true
   of NGHTTP2_HEADERS:
     var hs: seq[Header]
     discard s.inHeaders.pop(id, hs)
@@ -359,6 +362,10 @@ proc buffered*(s: H2Session; streamId: int32): int =
   ## Body bytes queued on `streamId` that nghttp2 has not framed yet.
   let o = s.outs.getOrDefault(streamId)
   if o != nil: o.buf.len - o.pos else: 0
+
+proc gotPeerSettings*(s: H2Session): bool =
+  ## True once the peer has sent its first SETTINGS frame, which every HTTP/2 peer sends first.
+  s.peerSettings
 
 proc queuedBytes*(s: H2Session): int =
   ## Body bytes queued on all streams that nghttp2 has not framed yet.
