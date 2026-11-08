@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Security
+- nghttp2 1.61.0 or later is required (was 1.57.0), which limits the CONTINUATION flood (CVE-2024-28182); the build fails with an `#error` against an older header. The limits that nghttp2 applies by default to CONTINUATION frames (8 after a HEADERS frame) and to RST_STREAM (a burst of 1000, then 33 a second: Rapid Reset, CVE-2023-44487) are now set by the library itself, and `tests/th2session.nim` feeds a server the frames of a flood.
+
 ### Added
 - IPv6. A server listens on an IPv6 address (`address = "::1"`), or on both families (`address = "::"`, dual-stack); the blocking `dial` takes IPv6 literals ("::1", "[::1]") and tries every address a name resolves to, IPv6 ones included, in the resolver's order, each with `connectTimeoutMs`. The `:authority` of an IPv6 host is bracketed. Until now the sockets were IPv4 only: a server could not bind `::1` and a host with only an AAAA record could not be reached. The chronos adapter already resolved both families and now has tests. Test: `tests/tipv6.nim` (skipped without an IPv6 loopback).
 - `shutdown(GrpcChannel)`: closes every connection of the channel and frees nothing. Calls in progress, on any thread, fail at once, and new calls are refused. A program whose threads wait in calls can stop them with it, join them, and only then `close` the channel. Safe from any thread and more than once.
@@ -9,6 +12,7 @@
 - The builds of this repository honour `CC`, `CFLAGS` and `LDFLAGS` from the environment (added to the flags in use); see [docs/building.md](docs/building.md), which also says how debug information, repeatable builds and installation are handled.
 
 ### Fixed
+- Deadlines and timed waits of the blocking adapter counted on `CLOCK_REALTIME`, so a step of the system clock (NTP, a resumed virtual machine) shortened or stretched a timeout. They count on `CLOCK_MONOTONIC` now (Linux; other systems keep the wall clock). Test: `tests/tblocking.nim`, which fails with the old pairing of clocks.
 - `close(GrpcChannel)` from one thread while a call of another thread was waiting in `recv` freed the connection under that call: the call that then failed touched freed memory (found with AddressSanitizer in a program that closed its channel to end its reader thread; the corrupted heap ended in a thread spinning for ever in the allocator). `close` now waits (up to ten seconds) for the calls that are inside a procedure of the library on another thread to leave it, and does not free the channel if one does not. A call that has not entered the library yet cannot be waited for: do not start calls on a channel that is being closed. Test: `tests/tchannelclose.nim`.
 
 ## 0.2.1 — 2026-11-03

@@ -6,6 +6,8 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 ## Unreleased
 
+- **nghttp2**: 1.61.0 or later is now required (was 1.57.0): earlier versions are open to the CONTINUATION flood (CVE-2024-28182). An older header fails the build, with a message saying so.
+- **Timeouts**: deadlines and timed waits of the blocking adapter count on the monotonic clock (Linux), so a step of the system clock no longer shortens or stretches them. Nothing to do.
 - **IPv6**: the blocking `dial` now tries IPv6 addresses of a name too (before, IPv4 only). A name with an AAAA record that leads nowhere costs up to `connectTimeoutMs` before the IPv4 address is tried: lower `connectTimeoutMs` or fix the record if that matters. A server listens on one family unless you pass `address = "::"` (both).
 
 ## 0.2.1

@@ -179,9 +179,27 @@ converter toPtr(c: Conn): ptr ConnObj = c[].addr
 
 # ------------------------------------------------------------ time
 
+when defined(linux):
+  const timedClock = CLOCK_MONOTONIC
+    ## The clock of every deadline and timed wait: a step of the wall clock (NTP,
+    ## a resumed virtual machine) must not shorten or stretch a timeout.
+else:
+  const timedClock = CLOCK_REALTIME    # no pthread_condattr_setclock here
+
+proc initTimedCond(c: var Cond) =
+  ## A condition variable whose timed waits count on `timedClock`.
+  when defined(linux):
+    var attr: Pthread_condattr
+    discard pthread_condattr_init(attr.addr)
+    discard pthread_condattr_setclock(attr.addr, timedClock)
+    discard pthread_cond_init(cast[ptr Pthread_cond](c.addr), attr.addr)
+    discard pthread_condattr_destroy(attr.addr)
+  else:
+    initCond(c)
+
 proc deadlineIn*(ms: int): Timespec =
-  ## An absolute CLOCK_REALTIME deadline `ms` from now.
-  discard clock_gettime(CLOCK_REALTIME, result)
+  ## An absolute deadline `ms` from now, on `timedClock`.
+  discard clock_gettime(timedClock, result)
   let ns = result.tv_nsec.int + (ms mod 1000) * 1_000_000
   result.tv_sec = posix.Time(result.tv_sec.int + ms div 1000 + ns div 1_000_000_000)
   result.tv_nsec = ns mod 1_000_000_000
@@ -463,8 +481,8 @@ proc writerLoop(c: ptr ConnObj) =
 proc newConn(sock: Socket; sess: H2Session; server: ptr ServerObj): Conn =
   result = Conn(sock: sock, sess: sess, server: server, lastReadNs: nowNs())
   initLock(result.lock)
-  initCond(result.cond)
-  initCond(result.wcond)
+  initTimedCond(result.cond)
+  initTimedCond(result.wcond)
   result.outQ = initDeque[seq[byte]]()
 
 # ------------------------------------------------------------ I/O thread pool
@@ -654,7 +672,7 @@ proc deadlinePassed*(st: ServerStream): bool =
   ## True if the stream has a deadline and it is now past.
   if not st.hasDeadline: return false
   var now: Timespec
-  discard clock_gettime(CLOCK_REALTIME, now)
+  discard clock_gettime(timedClock, now)
   now.tv_sec.int > st.deadline.tv_sec.int or
     (now.tv_sec.int == st.deadline.tv_sec.int and now.tv_nsec >= st.deadline.tv_nsec)
 
@@ -662,7 +680,7 @@ proc remainingMs*(st: ServerStream): int =
   ## Milliseconds until the deadline (at least 0), or -1 without one.
   if not st.hasDeadline: return -1
   var now: Timespec
-  discard clock_gettime(CLOCK_REALTIME, now)
+  discard clock_gettime(timedClock, now)
   let ms = (st.deadline.tv_sec.int - now.tv_sec.int) * 1000 +
            (st.deadline.tv_nsec.int - now.tv_nsec.int) div 1_000_000
   max(ms, 0)
@@ -1097,7 +1115,7 @@ proc deadlinePassed*(st: ClientStream): bool =
   ## True if the stream has a deadline and it is now past.
   if not st.hasDeadline: return false
   var now: Timespec
-  discard clock_gettime(CLOCK_REALTIME, now)
+  discard clock_gettime(timedClock, now)
   now.tv_sec.int > st.deadline.tv_sec.int or
     (now.tv_sec.int == st.deadline.tv_sec.int and now.tv_nsec >= st.deadline.tv_nsec)
 
