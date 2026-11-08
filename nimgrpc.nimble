@@ -11,7 +11,7 @@ requires "nim >= 2.2.12", "bearssl >= 0.3.1", "chronos >= 4.0.4"
 const tests = ["tests/th2session.nim", "tests/tblocking.nim", "tests/tgrpc.nim",
                "tests/ttls.nim", "tests/tcodec.nim", "tests/tkeepalive.nim",
                "tests/twkt.nim", "tests/tasynch2.nim", "tests/tasyncgrpc.nim",
-               "tests/tlimits.nim", "tests/tasynclimits.nim", "tests/tchannelclose.nim"]
+               "tests/tlimits.nim", "tests/tasynclimits.nim", "tests/tchannelclose.nim", "tests/tipv6.nim"]
 
 proc runAll(flags, tag: string) =
   # A separate nimcache per flag set: Nim reuses C objects across --passC changes.
