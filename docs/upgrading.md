@@ -6,6 +6,9 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 ## Unreleased
 
+- **nghttp2**: 1.61.0 or later is now required (was 1.57.0): earlier versions are open to the CONTINUATION flood (CVE-2024-28182). An older header fails the build, with a message saying so.
+- **Timeouts**: deadlines and timed waits of the blocking adapter count on the monotonic clock (Linux), so a step of the system clock no longer shortens or stretches them. Nothing to do.
+
 ## 0.2.1
 
 - **Limits, first burst (0.2.0)**: a server refuses (REFUSED_STREAM, which the clients of this library report as UNAVAILABLE; it is safe to retry, the call did not run) the calls over `maxConcurrentStreams` that arrive in the first flight of a connection, before the client has read the server's SETTINGS; once SETTINGS are in, nghttp2 holds the excess back by itself. A client that opens more than the limit of calls at once on a connection it has just made should retry such a call, send one call first, or the server should raise the limit.

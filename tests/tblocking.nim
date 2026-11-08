@@ -1,6 +1,6 @@
 ## Blocking client and server over loopback TCP.
 
-import std/[unittest, strutils, typedthreads, os, times]
+import std/[unittest, strutils, typedthreads, os, times, monotimes]
 import nimgrpc/h2/blocking
 
 proc toBytes(s: string): seq[byte] = @(s.toOpenArrayByte(0, s.high))
@@ -87,6 +87,16 @@ suite "blocking h2 over tcp":
     srv.start()
     expect H2Error:
       discard c.request(reqHeaders(srv.port, "/x"), "a".toBytes)
+    c.close()
+
+  test "a deadline is waited for in full: timed waits and deadlines count on the same clock":
+    let c = dial("127.0.0.1", srv.port)
+    let t0 = getMonoTime()
+    expect H2Timeout:
+      discard c.request(reqHeaders(srv.port, "/slow"), "a".toBytes, timeoutMs = 120)
+    let ms = (getMonoTime() - t0).inMilliseconds
+    check ms >= 100          # a wait on another clock than the deadline returns at once
+    check ms < 280           # and it does not run on until the reply (the handler takes 300 ms)
     c.close()
 
   test "deadline resets the stream and the connection stays usable":
