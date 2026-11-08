@@ -111,6 +111,12 @@ hsNotServing)` sets a service; `health.shutdown()` makes everything NOT_SERVING 
 The other side is `import nimgrpc/healthclient`: `ch.checkHealth(service)`, `ch.isServing()`,
 `ch.waitServing(timeoutMs = 10_000)` and `ch.watchHealth()` on a blocking or a chronos channel.
 
+Reflection: `import nimgrpc/reflection`, then `let refl = newReflection()`,
+`refl.addFileDescriptor(echo_pb.fileDescriptorProto)` (the constant that `protoc-gen-nim` writes
+with `--nim_opt=blocking,descriptor`) and `srv.register(refl)` after the services let `grpcurl`
+and `grpc_cli` list the services (always) and describe them (with the descriptors), on a blocking
+or a chronos server. The well-known types are included.
+
 Cancellation: a handler's thread cannot be interrupted, and `stop` waits for
 handlers to return. Long handlers should therefore notice when their call is
 over (the client cancelled or left, the deadline passed, or the server is

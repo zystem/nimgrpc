@@ -121,3 +121,14 @@ NOT_SERVING at `shutdown`. It needs Go 1.25 or later (grpc-go 1.84) and the modu
 `GOTOOLCHAIN=go1.26.10 GOFLAGS=-mod=mod tests/interop/health_interop.sh`, with
 `GOPROXY=off` if the module is in the local cache. Result (grpc-go 1.84.0, 2026-11-09): all
 seven checks pass.
+
+## Reflection against grpc-go
+
+`tests/interop/reflection_interop.sh` runs grpc-go's reflection client (`tests/interop/goreflect`,
+the official `grpc_reflection_v1` and `v1alpha` stubs) against `tests/interop/reflectionserver.nim`:
+`list_services`, `valid_host` and `original_request` echoed, `file_containing_symbol` for a
+service (the file and its import of `google/protobuf/timestamp.proto`), a check that
+`protodesc.NewFiles` builds the descriptors it got (so no import is missing), the streaming flags
+of a method, a nested message by name, NOT_FOUND for an unknown symbol, and `list_services`
+on v1alpha. Same requirements as the health check. Result (grpc-go 1.84.0, 2026-11-09): all eight
+checks pass.

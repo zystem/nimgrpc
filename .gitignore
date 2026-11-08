@@ -19,3 +19,4 @@ nimcache/
 /coverage-out/
 !/tests/interop/gohealth/
 !/tests/interop/*.sh
+!/tests/interop/goreflect/

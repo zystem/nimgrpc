@@ -12,7 +12,7 @@
 ## A handler ends the call by returning (status OK) or by raising GrpcError
 ## (any other status). Any other CatchableError becomes UNKNOWN.
 
-import std/[tables, strutils]
+import std/[tables, strutils, algorithm]
 import ./status, ./wire, ./h2/blocking, ./compress/gzip
 export status, blocking.TlsConfig, blocking.tlsClientConfig, blocking.tlsServerConfig,
        blocking.TlsError, blocking.Keepalive, blocking.PingPolicy, blocking.Limits, blocking.CipherOrder,
@@ -310,6 +310,29 @@ proc addUnary*(s: GrpcServer; path: string; handler: UnaryHandler) =
 
 proc addStreaming*(s: GrpcServer; path: string; handler: StreamingHandler) =
   s.addStreamingRaw(path, callStreaming, cast[pointer](handler))
+
+proc serviceNamesOf(reg: ptr Registry): seq[string] =
+  ## The services of the registered methods ("/pkg.Svc/Method" -> "pkg.Svc"), sorted.
+  for path in reg.methods.keys:
+    if path.len > 1 and path[0] == '/':
+      let slash = path.rfind('/')
+      if slash > 1:
+        let name = path[1 ..< slash]
+        if name notin result: result.add name
+  result.sort()
+
+proc serviceNames*(s: GrpcServer): seq[string] =
+  ## The services that have a method registered, sorted.
+  serviceNamesOf(s.reg.addr)
+
+proc registryHandle*(s: GrpcServer): pointer =
+  ## For a handler that has to list the services of its own server later (see `servicesIn`):
+  ## stable for as long as the server lives.
+  cast[pointer](s.reg.addr)
+
+proc servicesIn*(handle: pointer): seq[string] {.gcsafe.} =
+  ## `serviceNames` of the server whose `registryHandle` this is; callable from a handler.
+  serviceNamesOf(cast[ptr Registry](handle))
 
 proc port*(s: GrpcServer): int = s.h2.port.int
 

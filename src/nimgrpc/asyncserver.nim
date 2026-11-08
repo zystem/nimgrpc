@@ -18,7 +18,7 @@
 ## need no polling. A handler that does long synchronous work between awaits
 ## can still check `ctx.isCancelled`.
 
-import std/[tables, strutils, options]
+import std/[tables, strutils, options, algorithm]
 import pkg/chronos
 import ./status, ./wire, ./h2/async, ./compress/gzip
 export status, options, async.TlsConfig, async.tlsClientConfig, async.tlsServerConfig,
@@ -293,6 +293,16 @@ proc start*(s: AsyncGrpcServer) =
     s.handle(st)
   s.h2 = newAsyncStreamServer(onStream, nil, Port(s.port), s.address,
                               s.tls, s.ka, s.policy, s.limits)
+
+proc serviceNames*(s: AsyncGrpcServer): seq[string] =
+  ## The services that have a method registered, sorted.
+  for path in s.methods.keys:
+    if path.len > 1 and path[0] == '/':
+      let slash = path.rfind('/')
+      if slash > 1:
+        let name = path[1 ..< slash]
+        if name notin result: result.add name
+  result.sort()
 
 proc port*(s: AsyncGrpcServer): int =
   if s.h2 != nil: s.h2.port.int else: s.port

@@ -78,6 +78,7 @@ type
     messages: seq[MessageDesc]
     enums: seq[EnumDesc]
     services: seq[ServiceDesc]
+    raw: seq[byte]       ## the FileDescriptorProto as protoc sent it
 
 template readFields(r: var PbReader; body: untyped) =
   while not r.atEnd:
@@ -162,6 +163,18 @@ proc parseService(r: var PbReader): ServiceDesc =
         else: m.skipField(wt, fieldNo)
       result.methods.add md
     else: r.skipField(wt, fieldNo)
+
+proc withoutSourceInfo(raw: seq[byte]): seq[byte] =
+  ## The FileDescriptorProto without `source_code_info` (field 9: the comments and positions that
+  ## protoc adds for plugins), which a reflection client has no use for.
+  var r = initReader(raw)
+  while not r.atEnd:
+    let start = r.pos
+    var fieldNo: int
+    var wt: WireType
+    r.getTag(fieldNo, wt)
+    r.skipField(wt, fieldNo)
+    if fieldNo != 9: result.add raw.toOpenArray(start, r.pos - 1)
 
 proc parseFile(r: var PbReader): FileDesc =
   readFields(r):
@@ -788,20 +801,22 @@ proc relImport(fromFile, toFile: string): string =
   "\"" & rel & "\""
 
 type GenOptions = object
+  descriptor: bool ## a constant with the serialized FileDescriptorProto (for nimgrpc/reflection)
   blocking: bool   ## blocking client and server API (nimgrpc/typed)
   async: bool      ## chronos client and server API (nimgrpc/asynctyped)
 
 proc parseOptions(param: string): GenOptions =
   ## The plugin parameter (`--nim_opt=...`): a comma-separated list of
-  ## `blocking` and `async`; the default is `blocking`.
+  ## `blocking`, `async` and `descriptor`; the default is `blocking`.
   if param.strip.len == 0: return GenOptions(blocking: true)
   for p in param.split(','):
     case p.strip
     of "blocking": result.blocking = true
     of "async": result.async = true
+    of "descriptor": result.descriptor = true
     of "": discard
     else: raise newException(ValueError, "unknown option " & p.strip.escape &
-                             " (expected blocking and/or async)")
+                             " (expected blocking, async and/or descriptor)")
 
 proc generate(reg: Registry; f: var FileDesc; opts: GenOptions): string =
   var g = Gen(reg: reg, file: f.addr, proto3: f.syntax == "proto3")
@@ -845,6 +860,19 @@ proc generate(reg: Registry; f: var FileDesc; opts: GenOptions): string =
     if opts.async:
       o.add g.genAsyncService(s)
       o.add ""
+  if opts.descriptor:
+    o.add "# The serialized FileDescriptorProto of " & f.name & ", for `nimgrpc/reflection`."
+    o.add "const fileDescriptorProto* ="
+    var i = 0
+    while i < f.raw.len:
+      var chunk = "  \""
+      for b in f.raw[i ..< min(i + 24, f.raw.len)]:
+        chunk.add "\\x" & toHex(int(b), 2).toLowerAscii
+      chunk.add "\""
+      i += 24
+      o.add chunk & (if i < f.raw.len: " &" else: "")
+    if f.raw.len == 0: o.add "  \"\""
+    o.add ""
   while o[^1] == "": o.setLen(o.len - 1)
   o.add "{.pop.}"
   o.add ""
@@ -864,7 +892,10 @@ proc main() =
     of 2: param = r.getString()
     of 15:
       var s = r.subReader()
-      files.add parseFile(s)
+      let raw = @(s.data.toOpenArray(0, s.len - 1))
+      var fd = parseFile(s)
+      fd.raw = withoutSourceInfo(raw)
+      files.add fd
     else: r.skipField(wt, fieldNo)
 
   var w: PbWriter
