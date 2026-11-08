@@ -8,6 +8,7 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 - **nghttp2**: 1.61.0 or later is now required (was 1.57.0): earlier versions are open to the CONTINUATION flood (CVE-2024-28182). An older header fails the build, with a message saying so.
 - **Timeouts**: deadlines and timed waits of the blocking adapter count on the monotonic clock (Linux), so a step of the system clock no longer shortens or stretches them. Nothing to do.
+- **IPv6**: the blocking `dial` now tries IPv6 addresses of a name too (before, IPv4 only). A name with an AAAA record that leads nowhere costs up to `connectTimeoutMs` before the IPv4 address is tried: lower `connectTimeoutMs` or fix the record if that matters. A server listens on one family unless you pass `address = "::"` (both).
 - **Handshake limit and TCP keepalive**: a server now closes a connection that has not completed the TLS handshake and sent its HTTP/2 preface and first SETTINGS within two minutes (`Limits.handshakeTimeoutMs`; 0 turns it off), and every connection gets the system's TCP keepalive after 15 seconds of silence (`Keepalive.tcpSecs`; 0 turns it off). A client that is slower than two minutes to start talking must raise the limit.
 
 ## 0.2.1

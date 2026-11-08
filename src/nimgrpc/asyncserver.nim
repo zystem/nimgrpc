@@ -269,6 +269,7 @@ proc newAsyncGrpcServer*(port = 0; address = "127.0.0.1";
                          maxMessage = defaultMaxMessage; tls: TlsConfig = nil;
                          keepalive = Keepalive(); pingPolicy = PingPolicy();
                          limits = Limits()): AsyncGrpcServer =
+  ## `address` as for `newGrpcServer`: "::" listens on IPv6 and IPv4.
   ## Register methods, then `start`. With `tls` (see `tlsServerConfig`)
   ## clients must use TLS 1.2 with ALPN h2. `keepalive` pings idle clients;
   ## `pingPolicy` limits how often clients may ping. `limits` caps the streams

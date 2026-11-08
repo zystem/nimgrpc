@@ -273,6 +273,8 @@ proc newGrpcServer*(port = 0; address = "127.0.0.1"; maxWorkers = 256;
                     maxMessage = defaultMaxMessage; tls: TlsConfig = nil;
                     keepalive = Keepalive(); pingPolicy = PingPolicy();
                     limits = Limits()): GrpcServer =
+  ## `address` is the interface to listen on: "127.0.0.1" (the default), "0.0.0.0", "::1" for
+  ## IPv6 loopback, or "::" for IPv6 and IPv4 together.
   ## At most `maxWorkers` calls run at once; more wait for a free worker.
   ## `limits` caps the streams of a connection, the connections and the bytes
   ## queued per connection (see `Limits`; 100 streams by default).

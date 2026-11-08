@@ -631,7 +631,7 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   ## Each address gets `connectTimeoutMs` to accept the TCP connection (a
   ## negative value waits as long as the system does); past it the last
   ## address's `AsyncTimeoutError` is raised.
-  let addrs = resolveTAddress(host, port)
+  let addrs = resolveTAddress(stripBrackets(host), port)
   if addrs.len == 0: raise newException(TransportError, "cannot resolve " & host)
   var transp: StreamTransport
   var lastErr: ref CatchableError

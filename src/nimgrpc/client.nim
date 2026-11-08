@@ -16,7 +16,7 @@
 ## caller that wants to join its threads first).
 
 import std/[strutils, locks, atomics, os]
-import ./status, ./wire, ./h2/blocking, ./compress/gzip, ./cleanup
+import ./status, ./wire, ./h2/blocking, ./h2/common, ./compress/gzip, ./cleanup
 export status, blocking.TlsConfig, blocking.tlsClientConfig, blocking.tlsServerConfig,
        blocking.TlsError, blocking.Keepalive, blocking.CipherOrder,
        blocking.setCipherOrder, blocking.setSessionLifetime, blocking.defaultSessionLifetime
@@ -84,6 +84,8 @@ proc connect(c: ptr ChannelObj): Conn =
 proc dial*(host: string; port: int; tls: TlsConfig = nil; serverName = "";
            keepalive = Keepalive();
            connectTimeoutMs = blocking.defaultConnectTimeoutMs): GrpcChannel =
+  ## `host` is a name or an address, IPv4 or IPv6 ("::1" or "[::1]"); a name is tried at
+  ## every address it resolves to, IPv6 ones included, in the resolver's order.
   ## Without `tls`: plaintext HTTP/2 (h2c) with prior knowledge. With it:
   ## TLS 1.2 with ALPN h2; the server certificate must match `serverName`
   ## (default `host`; DNS names only, so use a name such as "localhost"
@@ -100,7 +102,7 @@ proc dial*(host: string; port: int; tls: TlsConfig = nil; serverName = "";
   c.serverName = serverName
   c.keepalive = keepalive
   c.connectTimeoutMs = connectTimeoutMs
-  c.authority = (if serverName.len > 0: serverName else: host) & ":" & $port
+  c.authority = hostPort(if serverName.len > 0: serverName else: host, port)
   c.scheme = if tls != nil: "https" else: "http"
   var why: ref GrpcError
   try:

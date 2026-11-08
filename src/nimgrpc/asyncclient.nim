@@ -12,7 +12,7 @@
 
 import std/[strutils, options]
 import pkg/chronos
-import ./status, ./wire, ./h2/async, ./compress/gzip
+import ./status, ./wire, ./h2/async, ./h2/common, ./compress/gzip
 export status, options, async.TlsConfig, async.tlsClientConfig, async.TlsError,
        async.Keepalive, async.CipherOrder, async.setCipherOrder, async.setSessionLifetime, async.defaultSessionLifetime
 
@@ -75,7 +75,7 @@ proc dialAsync*(host: string; port: int; tls: TlsConfig = nil; serverName = "";
   ## beyond the system's) and fails with UNAVAILABLE past it.
   let ch = AsyncChannel(host: host, port: port, tls: tls, serverName: serverName,
                         keepalive: keepalive, connectTimeoutMs: connectTimeoutMs,
-                        authority: (if serverName.len > 0: serverName else: host) & ":" & $port,
+                        authority: hostPort(if serverName.len > 0: serverName else: host, port),
                         scheme: if tls != nil: "https" else: "http")
   ch.conn = await ch.connect()
   ch

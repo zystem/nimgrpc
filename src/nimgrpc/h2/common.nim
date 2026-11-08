@@ -80,3 +80,16 @@ proc dropPrefix*(s: var seq[byte]; n: int) =
   let rest = s.len - n
   if rest > 0: moveMem(s[0].addr, s[n].addr, rest)
   s.setLen(rest)
+
+proc isIpv6Literal*(host: string): bool =
+  ## "::1", "::", "fe80::1", "[::1]": an address with a colon is IPv6.
+  ':' in host
+
+proc stripBrackets*(host: string): string =
+  ## "[::1]" -> "::1"; anything else unchanged.
+  if host.len > 2 and host[0] == '[' and host[^1] == ']': host[1 ..< host.high] else: host
+
+proc hostPort*(host: string; port: int): string =
+  ## "host:port" as an :authority; an IPv6 literal gets its brackets ("[::1]:50051").
+  let h = stripBrackets(host)
+  (if isIpv6Literal(h): "[" & h & "]" else: h) & ":" & $port
