@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- IPv6. A server listens on an IPv6 address (`address = "::1"`), or on both families (`address = "::"`, dual-stack); the blocking `dial` takes IPv6 literals ("::1", "[::1]") and tries every address a name resolves to, IPv6 ones included, in the resolver's order, each with `connectTimeoutMs`. The `:authority` of an IPv6 host is bracketed. Until now the sockets were IPv4 only: a server could not bind `::1` and a host with only an AAAA record could not be reached. The chronos adapter already resolved both families and now has tests. Test: `tests/tipv6.nim` (skipped without an IPv6 loopback).
 - `shutdown(GrpcChannel)`: closes every connection of the channel and frees nothing. Calls in progress, on any thread, fail at once, and new calls are refused. A program whose threads wait in calls can stop them with it, join them, and only then `close` the channel. Safe from any thread and more than once.
 - `nimble coverage` / `tools/coverage.sh`: statement coverage of `src/nimgrpc` from gcov (the Nim compiler's `#line` directives make it report `.nim` lines); 88.8% now, CI fails under 80% (job `tests (coverage, Nim 2.2.12)`). See [docs/building.md](docs/building.md).
 - The builds of this repository honour `CC`, `CFLAGS` and `LDFLAGS` from the environment (added to the flags in use); see [docs/building.md](docs/building.md), which also says how debug information, repeatable builds and installation are handled.

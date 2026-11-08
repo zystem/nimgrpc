@@ -18,7 +18,7 @@
 ## caller for a client, the server for accepted connections), so no reference
 ## count is touched from two threads.
 
-import std/[locks, net, tables, deques, os, posix, atomics]
+import std/[locks, net, tables, deques, os, posix, atomics, options, nativesockets]
 import ./session, ./common, ../tls/tls, ../cleanup, ../bytebuf
 
 export session.Header, session.H2Error, net.Port, tls, common.H2Timeout,
@@ -803,6 +803,34 @@ proc simpleTrampoline(st: var ServerStream; userData: pointer)
 
 # ------------------------------------------------------------ server
 
+proc connectAny(host: string; port: Port; timeoutMs: int): Socket =
+  ## The first address of `host` (IPv4 or IPv6, in the order the resolver gives) that accepts
+  ## the connection, each given `timeoutMs`. Raises the last error.
+  let ais = getAddrInfo(stripBrackets(host), port, Domain.AF_UNSPEC, SockType.SOCK_STREAM,
+                        Protocol.IPPROTO_TCP)
+  var lastErr: ref CatchableError
+  var ai = ais
+  try:
+    while ai != nil:
+      let dom = toKnownDomain(ai.ai_family)
+      if dom.isSome:
+        let sock = newSocket(dom.get, SockType.SOCK_STREAM, Protocol.IPPROTO_TCP,
+                             buffered = false)
+        try:
+          sock.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
+          let numeric = getAddrString(ai.ai_addr)
+          if timeoutMs >= 0: sock.connect(numeric, port, timeoutMs)
+          else: sock.connect(numeric, port)
+          return sock
+        except CatchableError as e:
+          sock.close()      # a socket that never connected must not keep its descriptor
+          lastErr = e
+      ai = ai.ai_next
+  finally:
+    freeAddrInfo(ais)
+  if lastErr != nil: raise lastErr
+  raise newException(OSError, "no usable address for " & host)
+
 proc newStreamServer*(handler: StreamHandler; userData: pointer = nil;
                       port = Port(0); address = "127.0.0.1";
                       maxWorkers = 256; tls: TlsConfig = nil;
@@ -817,9 +845,18 @@ proc newStreamServer*(handler: StreamHandler; userData: pointer = nil;
   initLock(result.jobLock)
   initCond(result.jobCond)
   result.jobs = initDeque[Job]()
-  result.listener = newSocket(buffered = false)
+  let bindHost = stripBrackets(address)
+  if isIpv6Literal(bindHost):
+    result.listener = newSocket(Domain.AF_INET6, SockType.SOCK_STREAM,
+                                Protocol.IPPROTO_TCP, buffered = false)
+    # "::" takes IPv4 clients too (dual-stack), whatever the system's default is
+    var v6only: cint = 0
+    discard setsockopt(result.listener.getFd, IPPROTO_IPV6.cint, IPV6_V6ONLY.cint,
+                       v6only.addr, sizeof(cint).SockLen)
+  else:
+    result.listener = newSocket(buffered = false)
   result.listener.setSockOpt(OptReuseAddr, true)
-  result.listener.bindAddr(port, address)
+  result.listener.bindAddr(port, bindHost)
   result.listener.listen()
 
 proc newServer*(handler: RequestHandler; userData: pointer = nil; port = Port(0);
@@ -966,14 +1003,7 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   ## to accept the TCP connection (a negative value waits as long as the
   ## system does); past it `TimeoutError` is raised. Resolving the name is not
   ## covered: it blocks for as long as the resolver takes.
-  let sock = newSocket(buffered = false)
-  try:
-    sock.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
-    if connectTimeoutMs >= 0: sock.connect(host, port, connectTimeoutMs)
-    else: sock.connect(host, port)
-  except CatchableError as e:
-    sock.close()              # a socket that never connected must not keep its descriptor
-    raise e
+  let sock = connectAny(host, port, connectTimeoutMs)
   result = newConn(sock, newClientSession(), nil)
   result.ka = keepalive
   if tls != nil:
