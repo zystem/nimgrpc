@@ -1,7 +1,7 @@
 ## A connection that never finishes its handshake is closed, a peer that does is kept, and the
 ## sockets of both ends carry the system's TCP keepalive.
 
-import std/[unittest, net, os, strutils, monotimes, times]
+import std/[unittest, net, os, strutils, monotimes, times, nativesockets]
 import pkg/chronos
 import nimgrpc
 import nimgrpc/[asyncclient, asyncserver]
@@ -42,6 +42,19 @@ proc keepaliveTimers(port: int): int =
       if f[5].startsWith("02:"): inc result
   if not any: result = -1
 
+proc readable(s: Socket; ms: int): bool =
+  ## Whether a read would not block (data, or the end of the stream). The tests wait with it
+  ## instead of `recv(timeout = ...)`, which raises on a timeout and leaves a string behind
+  ## that LeakSanitizer reports.
+  var rs = @[s.getFd]
+  selectRead(rs, ms) > 0
+
+proc readSome(s: Socket): int =
+  ## One read of whatever is there (0: the end of the stream). `recv(size)` of std/net would wait
+  ## for all the bytes it is asked for.
+  var buf: array[1024, byte]
+  s.recv(buf[0].addr, buf.len)
+
 proc settledTimers(port: int; want: int): int =
   ## `keepaliveTimers`, looked at again for up to two seconds until it shows `want`: right after
   ## a call a socket may still hold its delayed-ACK timer instead.
@@ -60,17 +73,14 @@ suite "the handshake guard of the blocking server":
     let srv = newGrpcServer(limits = Limits(handshakeTimeoutMs: 300))
     srv.addUnary("/t.T/E", echoUnary)
     srv.start()
-    let s = newSocket()
+    let s = newSocket(buffered = false)
     s.connect("127.0.0.1", Port(srv.port))
     let t0 = getMonoTime()
     var closed = false
-    try:
-      while true:                                       # the server's own SETTINGS come first
-        if s.recv(1024, timeout = 3000).len == 0:
-          closed = true                                 # end of stream: the server closed it
-          break
-    except CatchableError:
-      closed = false                                    # a timeout: it did not
+    while readable(s, 3000):                            # the server's own SETTINGS come first
+      if s.readSome == 0:
+        closed = true                                   # end of stream: the server closed it
+        break
     let ms = (getMonoTime() - t0).inMilliseconds
     s.close()
     check closed
@@ -82,21 +92,14 @@ suite "the handshake guard of the blocking server":
     let srv = newGrpcServer(limits = Limits(handshakeTimeoutMs: 300))
     srv.addUnary("/t.T/E", echoUnary)
     srv.start()
-    let s = newSocket()
+    let s = newSocket(buffered = false)
     s.connect("127.0.0.1", Port(srv.port))
     s.send(preface & frame(4, 0, 0, @[]))
-    try:
-      while true: discard s.recv(1024, timeout = 200)   # the server's own SETTINGS, then silence
-    except TimeoutError:
-      discard
+    while readable(s, 200): discard s.readSome          # the server's own SETTINGS, then silence
     sleep 900                                           # three times the limit
-    var stillOpen = false
-    try:
-      stillOpen = s.recv(1, timeout = 300).len > 0      # 0 would be the end of the stream
-    except TimeoutError:
-      stillOpen = true                                  # nothing to read: a timeout, not the end
-    except CatchableError:
-      stillOpen = false
+    var stillOpen = true
+    if readable(s, 300):                                # data or the end of the stream
+      stillOpen = s.readSome > 0                        # an empty read is the end
     s.close()
     check stillOpen
     srv.stop()
@@ -136,27 +139,27 @@ suite "TCP keepalive of the blocking adapter":
 var silentClosed, silentMs, keptOpen, timers: int
 
 proc asyncSilent(port: int) {.async.} =
-  let t = await connect(initTAddress("127.0.0.1", port))
+  let tr = await connect(initTAddress("127.0.0.1", port))
   let t0 = Moment.now()
   try:
-    discard await t.read().wait(chronos.seconds(3))    # to the end of the stream
+    discard await tr.read().wait(chronos.seconds(3))    # to the end of the stream
   except CatchableError:
     discard
   silentMs = (Moment.now() - t0).milliseconds.int
-  silentClosed = int(t.atEof)
-  await t.closeWait()
+  silentClosed = int(tr.atEof)
+  await tr.closeWait()
 
 proc asyncKept(port: int) {.async.} =
-  let t = await connect(initTAddress("127.0.0.1", port))
-  discard await t.write(preface & frame(4, 0, 0, @[]))
+  let tr = await connect(initTAddress("127.0.0.1", port))
+  discard await tr.write(preface & frame(4, 0, 0, @[]))
   await sleepAsync(chronos.milliseconds(900))            # three times the limit
   try:
-    discard await t.read().wait(chronos.milliseconds(300))   # it would end at once if closed
+    discard await tr.read().wait(chronos.milliseconds(300))   # it would end at once if closed
   except AsyncTimeoutError:
     keptOpen = 1
   except CatchableError:
     discard
-  await t.closeWait()
+  await tr.closeWait()
 
 proc asyncTimers(port: int) {.async.} =
   let ch = await dialAsync("127.0.0.1", port)

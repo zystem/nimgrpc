@@ -142,7 +142,7 @@ suite "limits of the session":
     check srv.queuedBytes == 0
 
 suite "nghttp2":
-  test "the linked library is 1.57.0 or later (Rapid Reset, CVE-2023-44487)":
+  test "the linked library is 1.61.0 or later (CONTINUATION flood CVE-2024-28182, Rapid Reset CVE-2023-44487)":
     let v = nghttp2_version(0)
-    check v.versionNum >= 0x013900
+    check v.versionNum >= 0x013d00
     echo "  nghttp2 ", v.versionStr

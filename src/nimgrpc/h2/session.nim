@@ -200,6 +200,15 @@ proc readOut(session: ptr Nghttp2Session; streamId: int32; buf: ptr uint8;
 
 # ---------------------------------------------------------------- public API
 
+const
+  maxContinuations* = 8
+    ## CONTINUATION frames allowed after one HEADERS frame; one more is a
+    ## connection error (CONTINUATION flood, CVE-2024-28182).
+  resetBurst = 1000'u64
+  resetRate = 33'u64
+    ## RST_STREAM frames a peer may send: a burst, then a rate per second;
+    ## past them the connection gets ENHANCE_YOUR_CALM (Rapid Reset, CVE-2023-44487).
+
 const receiveWindow* = 1024 * 1024
   ## What a peer may send us per stream, and per connection, before we credit
   ## it again; also the most a stream's unread data can grow to.
@@ -216,11 +225,14 @@ proc newSession(server, manualFlow: bool; maxStreams: int): H2Session =
   nghttp2_session_callbacks_set_on_stream_close_callback(cbs, cast[pointer](onStreamClose))
   let ud = cast[pointer](result[].addr)
   var opt: ptr Nghttp2Option
-  if manualFlow:
-    if nghttp2_option_new(opt.addr) != 0:
-      nghttp2_session_callbacks_del(cbs)
-      raise newException(H2Error, "nghttp2_option_new failed")
-    nghttp2_option_set_no_auto_window_update(opt, 1)
+  if nghttp2_option_new(opt.addr) != 0:
+    nghttp2_session_callbacks_del(cbs)
+    raise newException(H2Error, "nghttp2_option_new failed")
+  # What nghttp2 does by default today, written down so that a later default
+  # cannot loosen it unnoticed.
+  nghttp2_option_set_max_continuations(opt, maxContinuations.csize_t)
+  nghttp2_option_set_stream_reset_rate_limit(opt, resetBurst, resetRate)
+  if manualFlow: nghttp2_option_set_no_auto_window_update(opt, 1)
   let rv =
     if server: nghttp2_session_server_new2(result.raw.addr, cbs, ud, opt)
     else: nghttp2_session_client_new2(result.raw.addr, cbs, ud, opt)

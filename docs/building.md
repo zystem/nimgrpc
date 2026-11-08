@@ -2,7 +2,7 @@
 
 ## Build
 
-Requirements: Nim 2.2.12 or later (tested on 2.2.12 and 2.2.14), a C compiler, [nim-bearssl](https://github.com/status-im/nim-bearssl) (`nimble install bearssl`; BearSSL is compiled from source), zlib (`-lz`, or `-d:zlibStatic`), nghttp2 1.57.0 or later (earlier versions lack the mitigation of the Rapid Reset attack, CVE-2023-44487; the build fails with an `#error` if the header is older) linked statically, and [chronos](https://github.com/status-im/nim-chronos) for the async API.
+Requirements: Nim 2.2.12 or later (tested on 2.2.12 and 2.2.14), a C compiler, [nim-bearssl](https://github.com/status-im/nim-bearssl) (`nimble install bearssl`; BearSSL is compiled from source), zlib (`-lz`, or `-d:zlibStatic`), nghttp2 1.61.0 or later (1.57 limits the Rapid Reset attack, CVE-2023-44487; 1.61 limits CONTINUATION frames, the CONTINUATION flood, CVE-2024-28182; the build fails with an `#error` if the header is older) linked statically, and [chronos](https://github.com/status-im/nim-chronos) for the async API.
 
 ```sh
 git clone https://github.com/zystem/nimgrpc && cd nimgrpc

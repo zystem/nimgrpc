@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Security
+- nghttp2 1.61.0 or later is required (was 1.57.0), which limits the CONTINUATION flood (CVE-2024-28182); the build fails with an `#error` against an older header. The limits that nghttp2 applies by default to CONTINUATION frames (8 after a HEADERS frame) and to RST_STREAM (a burst of 1000, then 33 a second: Rapid Reset, CVE-2023-44487) are now set by the library itself, and `tests/th2session.nim` feeds a server the frames of a flood.
+
+### Fixed
+- Deadlines and timed waits of the blocking adapter counted on `CLOCK_REALTIME`, so a step of the system clock (NTP, a resumed virtual machine) shortened or stretched a timeout. They count on `CLOCK_MONOTONIC` now (Linux; other systems keep the wall clock). Test: `tests/tblocking.nim`, which fails with the old pairing of clocks.
+
 ### Added
 - TCP keepalive and a limit for the handshake. Every connection, client and server, blocking and chronos, gets the system's TCP keepalive (`Keepalive.tcpSecs`, 15 seconds by default, 0 turns it off): a peer that has vanished is found and a NAT or load balancer does not forget a quiet connection. A server closes a connection whose peer has not completed the TLS handshake and sent its preface and first SETTINGS within `Limits.handshakeTimeoutMs` (120 seconds by default, 0 for no limit); until now such a connection, which holds two threads on the blocking server, stayed until the peer left. Test: `tests/thandshake.nim` (it reads the keepalive timers of the sockets from `/proc/net/tcp`). See [docs/threat-model.md](docs/threat-model.md).
 - `shutdown(GrpcChannel)`: closes every connection of the channel and frees nothing. Calls in progress, on any thread, fail at once, and new calls are refused. A program whose threads wait in calls can stop them with it, join them, and only then `close` the channel. Safe from any thread and more than once.

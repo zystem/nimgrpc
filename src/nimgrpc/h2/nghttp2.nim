@@ -15,8 +15,8 @@ const h = "nghttp2/nghttp2.h"
 
 {.emit: """/*INCLUDESECTION*/
 #include <nghttp2/nghttp2.h>
-#if NGHTTP2_VERSION_NUM < 0x013900
-#error "nimgrpc needs nghttp2 1.57.0 or later (it limits the Rapid Reset attack, CVE-2023-44487)"
+#if NGHTTP2_VERSION_NUM < 0x013d00
+#error "nimgrpc needs nghttp2 1.61.0 or later (it limits CONTINUATION frames, CVE-2024-28182, and Rapid Reset, CVE-2023-44487)"
 #endif
 """.}
 
@@ -138,6 +138,8 @@ proc nghttp2_session_server_new*(session: ptr ptr Nghttp2Session;
 proc nghttp2_option_new*(opt: ptr ptr Nghttp2Option): cint
 proc nghttp2_option_del*(opt: ptr Nghttp2Option)
 proc nghttp2_option_set_no_auto_window_update*(opt: ptr Nghttp2Option; val: cint)
+proc nghttp2_option_set_max_continuations*(opt: ptr Nghttp2Option; val: csize_t)
+proc nghttp2_option_set_stream_reset_rate_limit*(opt: ptr Nghttp2Option; burst, rate: uint64)
 proc nghttp2_session_client_new2*(session: ptr ptr Nghttp2Session;
   cbs: ptr Nghttp2SessionCallbacks; userData: pointer; opt: ptr Nghttp2Option): cint
 proc nghttp2_session_server_new2*(session: ptr ptr Nghttp2Session;
