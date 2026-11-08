@@ -69,13 +69,15 @@ type
     policy: PingPolicy
     lastRead: Moment
     created: Moment
+    activity: Moment           ## server: when a call last began or ended
     handshakeMs: int           ## server: how long the peer has to send its first SETTINGS; 0 for no limit
+    maxAgeMs, maxIdleMs, graceMs: int   ## server: `Limits.maxConnection...Ms`; 0 for no limit
     pingOutstanding: bool
     pingSent: Moment
     lastPingRecv: Moment
     pingStrikes: int
     goawayReceived: bool
-    readerF, writerF, pingerF, guardF: Task
+    readerF, writerF, pingerF, guardF, lifeF: Task
 
   AsyncStreamHandler* = proc (st: AsyncH2Stream; userData: pointer): Future[void]
     {.gcsafe, raises: [].}
@@ -219,6 +221,7 @@ proc handleEvents(c: AsyncH2Conn) =
         let ns = AsyncH2Stream(conn: c, id: ev.streamId, headers: ev.headers,
                                blocks: @[ev.headers], inEnded: ev.headersEndStream)
         c.streams[ev.streamId] = ns
+        c.activity = Moment.now()
         c.lastDispatched = ev.streamId
         ns.handler = c.runHandler(ns)
     of evData:
@@ -393,11 +396,71 @@ proc handshakeGuard(c: AsyncH2Conn) {.async: (raises: []).} =
     except CancelledError:
       break
 
+proc lifecycleLoop(c: AsyncH2Conn) {.async: (raises: []).} =
+  ## Server: drains a connection that is too old or has had no call for too long: an advisory
+  ## GOAWAY, the final one a moment later, then the calls in progress finish (for up to
+  ## `graceMs`) and the connection closes.
+  let ageNs = c.maxAgeMs.int64 * 1_000_000
+  # +-10% so that the clients of a restarted server do not all return together
+  let ageDue = if c.maxAgeMs > 0:
+                 c.created + nanoseconds(ageNs + ageNs * ((c.created.epochNanoSeconds div 1000) mod 21 - 10) div 100)
+               else: c.created
+  var state = 0               # 0 serving, 1 advisory GOAWAY out, 2 final GOAWAY out
+  var stateAt = c.created     # when state 1 began; the end of the grace in state 2
+  var why = ""
+  while not c.closed:
+    let now = Moment.now()
+    var wait = 1.hours
+    case state
+    of 0:
+      if c.streams.len > 0: c.activity = now
+      if c.maxAgeMs > 0:
+        if now >= ageDue: why = "maximum connection age"
+        else: wait = min(wait, ageDue - now)
+      if c.maxIdleMs > 0:
+        let idleDue = c.activity + c.maxIdleMs.milliseconds
+        if now >= idleDue:
+          if why.len == 0: why = "maximum connection idle time"
+        else: wait = min(wait, min(idleDue - now, 1.seconds))
+      if why.len > 0:
+        try:
+          c.sess.shutdownNotice()
+          c.queueOutput()
+        except CatchableError as e:
+          c.fail(e.msg)
+          return
+        state = 1
+        stateAt = now
+        wait = 100.milliseconds
+    of 1:
+      if now >= stateAt + 100.milliseconds:
+        try:
+          c.sess.goAway()
+          c.queueOutput()
+        except CatchableError as e:
+          c.fail(e.msg)
+          return
+        state = 2
+        stateAt = now + c.graceMs.milliseconds
+      wait = 100.milliseconds
+    else:
+      if c.streams.len == 0:
+        c.fail("connection drained")
+        return
+      if c.graceMs > 0 and now >= stateAt:
+        c.fail("grace of the connection over")
+        return
+      wait = 100.milliseconds
+    try:
+      discard await withTimeout(c.closedEv.wait(), max(wait, 1.milliseconds))
+    except CancelledError:
+      break
+
 proc newConn(transp: StreamTransport; sess: H2Session; server: AsyncH2Server;
              ka: Keepalive): AsyncH2Conn =
   AsyncH2Conn(transp: transp, sess: sess, server: server, ka: ka,
               outQ: initDeque[seq[byte]](), writeEv: newAsyncEvent(),
-              closedEv: newAsyncEvent(), lastRead: Moment.now(), created: Moment.now())
+              closedEv: newAsyncEvent(), lastRead: Moment.now(), created: Moment.now(), activity: Moment.now())
 
 proc start(c: AsyncH2Conn) =
   c.queueOutput()             # client preface / SETTINGS
@@ -405,6 +468,7 @@ proc start(c: AsyncH2Conn) =
   c.writerF = c.writerLoop()
   if c.ka.timeMs > 0: c.pingerF = c.pingerLoop()
   if c.handshakeMs > 0: c.guardF = c.handshakeGuard()
+  if c.maxAgeMs > 0 or c.maxIdleMs > 0: c.lifeF = c.lifecycleLoop()
 
 proc shutdown(c: AsyncH2Conn) {.async: (raises: []).} =
   ## Sends GOAWAY (and TLS close_notify), closes the connection and waits
@@ -422,6 +486,7 @@ proc shutdown(c: AsyncH2Conn) {.async: (raises: []).} =
   if c.readerF != nil: await noCancel c.readerF
   if c.pingerF != nil: await noCancel c.pingerF
   if c.guardF != nil: await noCancel c.guardF
+  if c.lifeF != nil: await noCancel c.lifeF
 
 # ------------------------------------------------------------ streams
 
@@ -692,6 +757,7 @@ proc closeSend*(st: AsyncH2Stream): Future[void] =
 # ------------------------------------------------------------ server
 
 proc finishHandler(c: AsyncH2Conn; st: AsyncH2Stream) =
+  c.activity = Moment.now()
   if not st.outEnded and not st.closed and not c.closed:
     try:
       c.sess.resetStream(st.id, INTERNAL_ERROR)
@@ -744,6 +810,9 @@ proc newAsyncStreamServer*(handler: AsyncStreamHandler; userData: pointer = nil;
         manualFlow = true, maxConcurrentStreams = s.limits.maxConcurrentStreams), s, s.ka)
       c.maxBuffer = s.limits.maxConnectionBuffer
       c.handshakeMs = s.limits.handshakeTimeoutMs
+      c.maxAgeMs = s.limits.maxConnectionAgeMs
+      c.maxIdleMs = s.limits.maxConnectionIdleMs
+      c.graceMs = s.limits.maxConnectionAgeGraceMs
       c.policy = s.policy
       setTcpKeepalive(cint(transp.fd), s.ka.tcpSecs)
       if s.tls != nil: c.tls = newServerTls(s.tls)

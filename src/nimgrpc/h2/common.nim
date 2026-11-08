@@ -46,6 +46,19 @@ type
     handshakeTimeoutMs*: int = 120_000
       ## A connection that has not completed the TLS handshake and sent the HTTP/2 preface and
       ## its first SETTINGS this long after it was accepted is closed. 0 means no limit.
+    maxConnectionAgeMs*: int = 0
+      ## A connection older than this (give or take 10%, so that the clients of a server that
+      ## restarted do not all come back together) gets GOAWAY: calls in progress finish, the
+      ## clients dial a new connection for the next call, and the old one closes when its calls
+      ## are done. It spreads load over new instances behind a load balancer and makes clients
+      ## resolve names again. 0 means no limit.
+    maxConnectionAgeGraceMs*: int = 30_000
+      ## After the GOAWAY of `maxConnectionAgeMs` or `maxConnectionIdleMs`, calls that are still
+      ## running get this long; then the connection is closed and they are cancelled. 0 waits
+      ## for them for ever.
+    maxConnectionIdleMs*: int = 0
+      ## A connection with no call in progress for this long gets GOAWAY and is closed. 0 means
+      ## no limit.
     maxConnectionBuffer*: int = 16 * 1024 * 1024
       ## Body bytes that handlers have queued on all the streams of one
       ## connection and the socket has not taken; a sender waits above it.
