@@ -19,6 +19,11 @@ type
       ## time (default 20 s when 0).
     withoutCalls*: bool
       ## Client: ping also while no call is in progress.
+    tcpSecs*: int = 15
+      ## The system's TCP keepalive on the socket: a probe after this many seconds of silence
+      ## and every this many seconds after, the connection dropped after 9 unanswered. It
+      ## finds a vanished peer without HTTP/2 PINGs and keeps a NAT or load balancer from
+      ## forgetting a quiet connection. 0 leaves the system's default (off).
 
   PingPolicy* = object
     ## Server: what clients may do with PINGs (gRPC's enforcement policy).
@@ -38,6 +43,9 @@ type
     maxConnections*: int = 0
       ## Connections served at once; a connection past the limit is closed
       ## at once. 0 means no limit.
+    handshakeTimeoutMs*: int = 120_000
+      ## A connection that has not completed the TLS handshake and sent the HTTP/2 preface and
+      ## its first SETTINGS this long after it was accepted is closed. 0 means no limit.
     maxConnectionBuffer*: int = 16 * 1024 * 1024
       ## Body bytes that handlers have queued on all the streams of one
       ## connection and the socket has not taken; a sender waits above it.
