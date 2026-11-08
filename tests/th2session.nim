@@ -118,3 +118,26 @@ suite "h2 session":
     for ev in s.takeEvents():
       if ev.kind == evStreamClosed: code = ev.errorCode
     check code == 8   # CANCEL
+
+proc frame(typ, flags: byte; stream: uint32; payload: seq[byte]): seq[byte] =
+  let n = payload.len
+  result = @[byte(n shr 16), byte(n shr 8), byte(n), typ, flags,
+             byte(stream shr 24), byte(stream shr 16), byte(stream shr 8), byte(stream)]
+  result.add payload
+
+proc continuationStream(frames: int): seq[byte] =
+  ## The client preface, a HEADERS frame that does not end its header block,
+  ## and `frames` CONTINUATION frames (each one more header, "a: x").
+  for ch in "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n": result.add byte(ch)
+  result.add frame(4, 0, 0, @[])                        # SETTINGS
+  result.add frame(1, 0, 1, @[0x83'u8])                 # HEADERS ":method: POST", no END_HEADERS
+  for i in 0 ..< frames:
+    result.add frame(9, 0, 1, @[0x00'u8, 0x01, 0x61, 0x01, 0x78])
+
+suite "flood limits":
+  test "CONTINUATION frames up to the limit are accepted, one more ends the connection (CVE-2024-28182)":
+    let ok = newServerSession()
+    ok.recv(continuationStream(maxContinuations))
+    let tooMany = newServerSession()
+    expect H2Error:
+      tooMany.recv(continuationStream(maxContinuations + 1))

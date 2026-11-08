@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Security
+- nghttp2 1.61.0 or later is required (was 1.57.0), which limits the CONTINUATION flood (CVE-2024-28182); the build fails with an `#error` against an older header. The limits that nghttp2 applies by default to CONTINUATION frames (8 after a HEADERS frame) and to RST_STREAM (a burst of 1000, then 33 a second: Rapid Reset, CVE-2023-44487) are now set by the library itself, and `tests/th2session.nim` feeds a server the frames of a flood.
+
+### Fixed
+- Deadlines and timed waits of the blocking adapter counted on `CLOCK_REALTIME`, so a step of the system clock (NTP, a resumed virtual machine) shortened or stretched a timeout. They count on `CLOCK_MONOTONIC` now (Linux; other systems keep the wall clock). Test: `tests/tblocking.nim`, which fails with the old pairing of clocks.
+
 ### Added
 - `shutdown(GrpcChannel)`: closes every connection of the channel and frees nothing. Calls in progress, on any thread, fail at once, and new calls are refused. A program whose threads wait in calls can stop them with it, join them, and only then `close` the channel. Safe from any thread and more than once.
 - `nimble coverage` / `tools/coverage.sh`: statement coverage of `src/nimgrpc` from gcov (the Nim compiler's `#line` directives make it report `.nim` lines); 88.8% now, CI fails under 80% (job `tests (coverage, Nim 2.2.12)`). See [docs/building.md](docs/building.md).
