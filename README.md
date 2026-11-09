@@ -82,7 +82,7 @@ let srv = newGrpcServer(port = 50051,
                         clientCaPem = readFile("ca.pem")))   # omit for plain TLS
 let ch = dial("10.0.0.5", 50051,
   tlsClientConfig(readFile("ca.pem"), readFile("client.pem"), readFile("client.key")),
-  serverName = "api.internal")   # checked against the certificate's DNS names
+  serverName = "api.internal")   # checked against the certificate's DNS names (an IP address: its IP entries)
 ```
 
 gzip compression: clients pass `compression = "gzip"` to a call (every

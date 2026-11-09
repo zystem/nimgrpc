@@ -88,8 +88,9 @@ proc dial*(host: string; port: int; tls: TlsConfig = nil; serverName = "";
   ## every address it resolves to, IPv6 ones included, in the resolver's order.
   ## Without `tls`: plaintext HTTP/2 (h2c) with prior knowledge. With it:
   ## TLS 1.2 with ALPN h2; the server certificate must match `serverName`
-  ## (default `host`; DNS names only, so use a name such as "localhost"
-  ## rather than an IP address). Connects right away and raises
+  ## (default `host`): a DNS name is checked against the certificate's dNSName entries (and CN),
+  ## an IP address ("10.0.0.5", "::1", "[::1]") against its iPAddress entries; no SNI is sent
+  ## for an IP address. Connects right away and raises
   ## GrpcError(UNAVAILABLE) if the server cannot be reached; a failed
   ## handshake is reported by the first call. Later connections are made on
   ## demand. Each attempt to connect gets `connectTimeoutMs` (20 s by default;

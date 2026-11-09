@@ -57,6 +57,46 @@ suite "TLS":
     ch.close()
     srv.stop()
 
+  test "a server dialled by its IP address is checked against the iPAddress entries":
+    let srv = newTestServer(tls = tlsServerConfig(pem"server.pem", pem"server.key"))
+    srv.start()
+    let ch = dial("127.0.0.1", srv.port, tlsClientConfig(pem"ca.pem"))   # no serverName: the IP
+    ch.echoOnce()
+    ch.close()
+    let rsa = newTestServer(tls = tlsServerConfig(pem"rsaserver.pem", pem"rsaserver.key"))
+    rsa.start()
+    let ch2 = dial("127.0.0.1", rsa.port, tlsClientConfig(pem"ca.pem"), "127.0.0.1")
+    ch2.echoOnce()
+    ch2.close()
+    rsa.stop()
+    srv.stop()
+
+  test "an IP address that is not in the certificate is rejected, and so is an untrusted CA":
+    let srv = newTestServer(tls = tlsServerConfig(pem"server.pem", pem"server.key"))
+    srv.start()
+    let ch = dial("127.0.0.1", srv.port, tlsClientConfig(pem"ca.pem"), "127.0.0.2")
+    let msg = expectFailure(proc () = ch.echoOnce())
+    check "server name" in msg
+    ch.close()
+    let ch6 = dial("127.0.0.1", srv.port, tlsClientConfig(pem"ca.pem"), "[::1]")
+    check "server name" in expectFailure(proc () = ch6.echoOnce())
+    ch6.close()
+    srv.stop()
+    let rogue = newTestServer(tls = tlsServerConfig(pem"rogue.pem", pem"rogue.key"))
+    rogue.start()
+    let ch3 = dial("127.0.0.1", rogue.port, tlsClientConfig(pem"ca.pem"))
+    check "trusted CA" in expectFailure(proc () = ch3.echoOnce())
+    ch3.close()
+    rogue.stop()
+
+  test "a name is still checked against DNS names, not IP entries":
+    let srv = newTestServer(tls = tlsServerConfig(pem"server.pem", pem"server.key"))
+    srv.start()
+    let ch = dial("127.0.0.1", srv.port, tlsClientConfig(pem"ca.pem"), "localhost")
+    ch.echoOnce()
+    ch.close()
+    srv.stop()
+
   test "plaintext client against a TLS server fails":
     let srv = newTestServer(tls = tlsServerConfig(pem"server.pem", pem"server.key"))
     srv.start()

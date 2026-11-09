@@ -140,7 +140,8 @@ proc tlsServerConfig*(certChainPem, privateKeyPem: string; clientCaPem = "";
     result.requireClientCert()
 
 proc newClientTls*(c: TlsConfig; serverName: string): TlsConn =
-  ## `serverName` must match a DNS name in the server's certificate.
+  ## `serverName` must match a DNS name (dNSName entry or CN) in the server's certificate, or, if it
+  ## is an IP address, an iPAddress entry; no SNI is sent for an IP address.
   let raw = gtls_client_new(c.raw, serverName.cstring)
   if raw.isNil: c.fail("client session")
   TlsConn(raw: raw)
