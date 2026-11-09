@@ -1212,7 +1212,7 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
            keepalive = Keepalive(); connectTimeoutMs = defaultConnectTimeoutMs): Conn =
   ## Without `tls`: HTTP/2 with prior knowledge (h2c). With it: TLS 1.2,
   ## ALPN h2, the server's certificate checked against `serverName` (default:
-  ## `host`; DNS names only). A failed handshake shows up as an error on the
+  ## `host`; an IP address is matched with the certificate's iPAddress entries). A failed handshake shows up as an error on the
   ## first stream. Each address the name resolves to gets `connectTimeoutMs`
   ## to accept the TCP connection (a negative value waits as long as the
   ## system does); past it `TimeoutError` is raised. Resolving the name is not

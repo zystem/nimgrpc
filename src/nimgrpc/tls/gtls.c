@@ -15,6 +15,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
+#include <arpa/inet.h>
 #include "bearssl.h"
 
 /* ------------------------------------------------------------------ buffers */
@@ -323,20 +324,113 @@ typedef struct {
     const br_x509_class **inner;
     int validated;
     int chain_seen;                /* a certificate chain was presented in this handshake */
+    /* A server named by an IP address: BearSSL checks DNS names only, so the leaf certificate
+     * is kept and its iPAddress entries (subjectAltName) are compared with `ip` here. */
+    int want_ip;                   /* 4 or 16: the length of `ip`; 0 for a DNS name */
+    unsigned char ip[16];
+    int cert_idx;                  /* the certificate of the chain being read */
+    unsigned char *leaf;
+    size_t leaf_len, leaf_cap;
+    int leaf_bad;                  /* the leaf was too large to keep */
 } x509_watch;
+
+/* ---- the iPAddress entries of a certificate (DER, just enough of it) */
+
+/* One element at buf[*pos]: its tag, and where its content is. 0 if malformed. */
+static int der_next(const unsigned char *buf, size_t len, size_t *pos,
+                    unsigned *tag, size_t *cstart, size_t *clen) {
+    size_t p = *pos;
+    if (p + 2 > len) return 0;
+    *tag = buf[p++];
+    size_t l = buf[p++];
+    if (l & 0x80) {
+        size_t n = l & 0x7f;
+        if (n == 0 || n > 3 || p + n > len) return 0;
+        l = 0;
+        while (n--) l = (l << 8) | buf[p++];
+    }
+    if (l > len - p) return 0;
+    *cstart = p;
+    *clen = l;
+    *pos = p + l;
+    return 1;
+}
+
+/* Whether the certificate has an iPAddress subjectAltName equal to ip[0..iplen). */
+static int cert_has_ip(const unsigned char *der, size_t len, const unsigned char *ip, int iplen) {
+    static const unsigned char oid_san[] = { 0x55, 0x1d, 0x11 };
+    size_t pos = 0, cs, cl;
+    unsigned tag;
+    if (!der_next(der, len, &pos, &tag, &cs, &cl) || tag != 0x30) return 0;      /* Certificate */
+    size_t p = cs, end = cs + cl;
+    if (!der_next(der, end, &p, &tag, &cs, &cl) || tag != 0x30) return 0;        /* tbsCertificate */
+    size_t tp = cs, tend = cs + cl;
+    while (tp < tend) {
+        size_t es, el;
+        if (!der_next(der, tend, &tp, &tag, &es, &el)) return 0;
+        if (tag != 0xa3) continue;                                               /* [3] extensions */
+        size_t xp = es;
+        size_t ss, sl;
+        if (!der_next(der, es + el, &xp, &tag, &ss, &sl) || tag != 0x30) return 0;
+        size_t ep = ss, eend = ss + sl;
+        while (ep < eend) {
+            size_t xs, xl;
+            if (!der_next(der, eend, &ep, &tag, &xs, &xl) || tag != 0x30) return 0;
+            size_t ip2 = xs, iend = xs + xl;
+            size_t os, ol;
+            if (!der_next(der, iend, &ip2, &tag, &os, &ol) || tag != 0x06) return 0;
+            if (ol != sizeof oid_san || memcmp(der + os, oid_san, ol) != 0) continue;
+            if (ip2 < iend && der[ip2] == 0x01) {                                /* critical */
+                if (!der_next(der, iend, &ip2, &tag, &os, &ol)) return 0;
+            }
+            if (!der_next(der, iend, &ip2, &tag, &os, &ol) || tag != 0x04) return 0;
+            size_t np = os, nend = os + ol;
+            size_t gs, gl;
+            if (!der_next(der, nend, &np, &tag, &gs, &gl) || tag != 0x30) return 0;
+            size_t g = gs, gend = gs + gl;
+            while (g < gend) {
+                size_t vs, vl;
+                if (!der_next(der, gend, &g, &tag, &vs, &vl)) return 0;
+                if (tag == 0x87 && (int)vl == iplen && memcmp(der + vs, ip, vl) == 0) return 1;
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
+#define LEAF_MAX (128 * 1024)
 
 static void xw_start_chain(const br_x509_class **ctx, const char *name) {
     x509_watch *w = (x509_watch *)ctx;
     w->validated = 0;
     w->chain_seen = 1;
+    w->cert_idx = -1;
+    w->leaf_len = 0;
+    w->leaf_bad = 0;
     (*w->inner)->start_chain(w->inner, name);
 }
 static void xw_start_cert(const br_x509_class **ctx, uint32_t len) {
     x509_watch *w = (x509_watch *)ctx;
+    w->cert_idx++;
     (*w->inner)->start_cert(w->inner, len);
 }
 static void xw_append(const br_x509_class **ctx, const unsigned char *buf, size_t len) {
     x509_watch *w = (x509_watch *)ctx;
+    if (w->want_ip && w->cert_idx == 0 && !w->leaf_bad) {
+        if (w->leaf_len + len > LEAF_MAX) {
+            w->leaf_bad = 1;
+        } else {
+            if (w->leaf_len + len > w->leaf_cap) {
+                size_t nc = w->leaf_cap ? w->leaf_cap * 2 : 4096;
+                while (nc < w->leaf_len + len) nc *= 2;
+                unsigned char *nb = realloc(w->leaf, nc);
+                if (!nb) { w->leaf_bad = 1; nc = w->leaf_cap; }
+                else { w->leaf = nb; w->leaf_cap = nc; }
+            }
+            if (!w->leaf_bad) { memcpy(w->leaf + w->leaf_len, buf, len); w->leaf_len += len; }
+        }
+    }
     (*w->inner)->append(w->inner, buf, len);
 }
 static void xw_end_cert(const br_x509_class **ctx) {
@@ -346,6 +440,9 @@ static void xw_end_cert(const br_x509_class **ctx) {
 static unsigned xw_end_chain(const br_x509_class **ctx) {
     x509_watch *w = (x509_watch *)ctx;
     unsigned r = (*w->inner)->end_chain(w->inner);
+    if (r == 0 && w->want_ip &&
+        (w->leaf_bad || !cert_has_ip(w->leaf, w->leaf_len, w->ip, w->want_ip)))
+        r = BR_ERR_X509_BAD_SERVER_NAME;
     w->validated = (r == 0);
     return r;
 }
@@ -575,8 +672,9 @@ static void setup_common(gtls_conn *t, gtls_conf *c) {
     br_ssl_engine_add_flags(t->eng, BR_OPT_FAIL_ON_ALPN_MISMATCH);
 }
 
-/* A client session. `server_name` is checked against the server's certificate
- * (DNS names only) and sent as SNI. Returns NULL on error. */
+/* A client session. `server_name` is checked against the server's certificate (a DNS name
+ * against its dNSName entries and CN, an IP address against its iPAddress entries) and sent
+ * as SNI unless it is an IP address. Returns NULL on error. */
 gtls_conn *gtls_client_new(gtls_conf *c, const char *server_name) {
     if (c->ta_num == 0) { strcpy(c->err, "client needs trust anchors"); return NULL; }
     gtls_conn *t = calloc(1, sizeof *t);
@@ -607,7 +705,22 @@ gtls_conn *gtls_client_new(gtls_conf *c, const char *server_name) {
         }
         pthread_mutex_unlock(&c->mu);
     }
-    if (!br_ssl_client_reset(&t->u.client, server_name, t->offered)) {
+    /* A name that is an IP address: no SNI (RFC 6066), BearSSL does not check a name, and the
+     * certificate's iPAddress entries are compared in xw_end_chain. */
+    const char *reset_name = server_name;
+    if (server_name && server_name[0]) {
+        char lit[256];
+        size_t n = strlen(server_name);
+        if (n > 2 && server_name[0] == '[' && server_name[n - 1] == ']') {
+            snprintf(lit, sizeof lit, "%.*s", (int)(n - 2), server_name + 1);
+        } else {
+            snprintf(lit, sizeof lit, "%s", server_name);
+        }
+        if (inet_pton(AF_INET, lit, t->watch.ip) == 1) t->watch.want_ip = 4;
+        else if (inet_pton(AF_INET6, lit, t->watch.ip) == 1) t->watch.want_ip = 16;
+        if (t->watch.want_ip) reset_name = NULL;
+    }
+    if (!br_ssl_client_reset(&t->u.client, reset_name, t->offered)) {
         free(t);
         return NULL;
     }
@@ -647,6 +760,7 @@ gtls_conn *gtls_server_new(gtls_conf *c) {
 
 void gtls_free(gtls_conn *t) {
     if (t) {
+        free(t->watch.leaf);
         memset(t, 0, sizeof *t);
         free(t);
     }
