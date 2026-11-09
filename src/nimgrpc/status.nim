@@ -14,6 +14,9 @@ type
   GrpcError* = object of CatchableError
     code*: StatusCode
     trailers*: Metadata
+    unprocessed*: bool
+      ## The server did not start on the call (it reset the stream with REFUSED_STREAM, or sent
+      ## GOAWAY below its id), so the same call may be sent again, whatever the method does.
 
 proc newGrpcError*(code: StatusCode; msg: string; trailers: Metadata = @[]): ref GrpcError =
   result = newException(GrpcError, msg)

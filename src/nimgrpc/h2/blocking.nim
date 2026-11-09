@@ -915,33 +915,127 @@ proc simpleTrampoline(st: var ServerStream; userData: pointer)
 
 # ------------------------------------------------------------ server
 
-proc connectAny(host: string; port: Port; timeoutMs: int): Socket =
-  ## The first address of `host` (IPv4 or IPv6, in the order the resolver gives) that accepts
-  ## the connection, each given `timeoutMs`. Raises the last error.
+type Target* = object
+  ## One address to connect to, as the resolver gave it.
+  domain: Domain
+  sa: Sockaddr_storage
+  len: SockLen
+
+proc targetsOf*(host: string; port: Port): seq[Target] =
+  ## Every address of `host` (IPv4 or IPv6), in the order of RFC 8305: the resolver's first
+  ## family first, then the families alternating.
   let ais = getAddrInfo(stripBrackets(host), port, Domain.AF_UNSPEC, SockType.SOCK_STREAM,
                         Protocol.IPPROTO_TCP)
-  var lastErr: ref CatchableError
-  var ai = ais
+  var all: seq[Target]
   try:
+    var ai = ais
     while ai != nil:
       let dom = toKnownDomain(ai.ai_family)
-      if dom.isSome:
-        let sock = newSocket(dom.get, SockType.SOCK_STREAM, Protocol.IPPROTO_TCP,
-                             buffered = false)
-        try:
-          sock.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
-          let numeric = getAddrString(ai.ai_addr)
-          if timeoutMs >= 0: sock.connect(numeric, port, timeoutMs)
-          else: sock.connect(numeric, port)
-          return sock
-        except CatchableError as e:
-          sock.close()      # a socket that never connected must not keep its descriptor
-          lastErr = e
+      if dom.isSome and ai.ai_addrlen.int <= sizeof(Sockaddr_storage):
+        var t = Target(domain: dom.get, len: ai.ai_addrlen.SockLen)
+        copyMem(t.sa.addr, ai.ai_addr, ai.ai_addrlen.int)
+        all.add t
       ai = ai.ai_next
   finally:
     freeAddrInfo(ais)
-  if lastErr != nil: raise lastErr
-  raise newException(OSError, "no usable address for " & host)
+  interleaveFamilies(all, proc (t: Target): bool = t.domain == Domain.AF_INET6)
+
+proc connectTargets*(targets: seq[Target]; host: string; timeoutMs: int;
+                     staggerMs = eyeballDelayMs): Socket =
+  ## Happy Eyeballs: connects to the first address; if it has not answered within `staggerMs`
+  ## (or has failed) the next is tried alongside it, and so on. The first to connect wins and
+  ## the others are dropped. Each attempt gets `timeoutMs` (negative: no limit beyond the
+  ## system's). Raises the last error.
+  type Attempt = object
+    fd: SocketHandle
+    domain: Domain
+    deadline: int64        ## monotonic ns; 0 for none
+  var live: seq[Attempt]
+  var next = 0
+  var lastErr = ""
+  var timedOut = false
+  var nextStart = nowNs()
+  proc dropAll(a: seq[Attempt]) =
+    for x in a: discard posix.close(x.fd)
+  while next < targets.len or live.len > 0:
+    let now = nowNs()
+    if next < targets.len and (live.len == 0 or now >= nextStart):
+      let t = targets[next]
+      inc next
+      let fd = createNativeSocket(t.domain, SockType.SOCK_STREAM, Protocol.IPPROTO_TCP)
+      if fd == osInvalidSocket:
+        lastErr = osErrorMsg(osLastError())
+      else:
+        fd.setBlocking(false)
+        let rc = posix.connect(fd, cast[ptr SockAddr](t.sa.unsafeAddr), t.len)
+        if rc == 0:
+          dropAll(live)
+          fd.setBlocking(true)
+          result = newSocket(fd, t.domain, SockType.SOCK_STREAM, Protocol.IPPROTO_TCP,
+                             buffered = false)
+          result.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
+          return
+        elif errno == EINPROGRESS:
+          live.add Attempt(fd: fd, domain: t.domain,
+                           deadline: if timeoutMs >= 0: now + timeoutMs.int64 * 1_000_000 else: 0)
+        else:
+          lastErr = osErrorMsg(osLastError())
+          discard posix.close(fd)
+      nextStart = now + staggerMs.int64 * 1_000_000
+      continue
+    # wait for an attempt to finish, the stagger to pass, or a deadline
+    var wakeNs = if next < targets.len: nextStart else: 0'i64
+    for a in live:
+      if a.deadline != 0 and (wakeNs == 0 or a.deadline < wakeNs): wakeNs = a.deadline
+    var waitMs: cint = -1
+    if wakeNs != 0: waitMs = cint(max(0'i64, (wakeNs - now + 999_999) div 1_000_000))
+    var pfds = newSeq[TPollfd](live.len)
+    for i, a in live: pfds[i] = TPollfd(fd: cint(a.fd), events: POLLOUT)
+    if live.len > 0:
+      discard posix.poll(pfds[0].addr, pfds.len.Tnfds, waitMs)
+    else:
+      continue
+    let after = nowNs()
+    var still: seq[Attempt]
+    var winner = -1
+    for i, a in live:
+      if winner < 0 and pfds[i].revents != 0:
+        var err: cint
+        var l = sizeof(cint).SockLen
+        discard getsockopt(a.fd, SOL_SOCKET, SO_ERROR, err.addr, l.addr)
+        if err == 0:
+          winner = still.len          # its place in `still`
+          still.add a
+        else:
+          lastErr = osErrorMsg(OSErrorCode(err))
+          timedOut = false
+          nextStart = 0              # a failed attempt: the next goes at once
+          discard posix.close(a.fd)
+      elif pfds[i].revents == 0 and a.deadline != 0 and after >= a.deadline:
+        lastErr = "connect timed out"
+        timedOut = true
+        nextStart = 0
+        discard posix.close(a.fd)
+      else:
+        still.add a
+    if winner >= 0:
+      let w = still[winner]
+      for k, a in still:
+        if k != winner: discard posix.close(a.fd)
+      w.fd.setBlocking(true)
+      result = newSocket(w.fd, w.domain, SockType.SOCK_STREAM, Protocol.IPPROTO_TCP,
+                         buffered = false)
+      result.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
+      return
+    live = still
+  if timedOut: raise newException(TimeoutError, "connect to " & host & " timed out")
+  raise newException(OSError, if lastErr.len > 0: lastErr else: "no usable address for " & host)
+
+proc connectAny(host: string; port: Port; timeoutMs: int): Socket =
+  ## An address of `host` that accepts the connection: see `connectTargets`.
+  let targets = targetsOf(host, port)
+  if targets.len == 0: raise newException(OSError, "no usable address for " & host)
+  connectTargets(targets, host, timeoutMs)
 
 proc newStreamServer*(handler: StreamHandler; userData: pointer = nil;
                       port = Port(0); address = "127.0.0.1";

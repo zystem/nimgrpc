@@ -106,3 +106,24 @@ proc hostPort*(host: string; port: int): string =
   ## "host:port" as an :authority; an IPv6 literal gets its brackets ("[::1]:50051").
   let h = stripBrackets(host)
   (if isIpv6Literal(h): "[" & h & "]" else: h) & ":" & $port
+
+const eyeballDelayMs* = 250
+  ## Happy Eyeballs (RFC 8305): how long an attempt to connect has to itself before the next
+  ## address is tried alongside it. A failed attempt starts the next one at once.
+
+proc interleaveFamilies*[T](xs: openArray[T]; isIpv6: proc (x: T): bool {.raises: [], gcsafe.}): seq[T] =
+  ## The order to try addresses in: the family the resolver put first goes first, then the other
+  ## family, and so on, each family keeping its own order (RFC 8305, section 4). One dead IPv6
+  ## route among IPv4 addresses (or the other way round) then costs one delay, not one per
+  ## address.
+  if xs.len == 0: return
+  let firstIsV6 = isIpv6(xs[0])
+  var same, other: seq[T]
+  for x in xs:
+    if isIpv6(x) == firstIsV6: same.add x
+    else: other.add x
+  var i = 0
+  while i < same.len or i < other.len:
+    if i < same.len: result.add same[i]
+    if i < other.len: result.add other[i]
+    inc i
