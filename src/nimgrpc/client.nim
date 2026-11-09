@@ -15,7 +15,7 @@
 ## module (`shutdown` closes the connections without freeing anything, for a
 ## caller that wants to join its threads first).
 
-import std/[strutils, locks, atomics, os]
+import std/[strutils, locks, atomics, os, monotimes, times]
 import ./status, ./wire, ./h2/blocking, ./h2/common, ./compress/gzip, ./cleanup
 export status, blocking.TlsConfig, blocking.tlsClientConfig, blocking.tlsServerConfig,
        blocking.TlsError, blocking.Keepalive, blocking.CipherOrder,
@@ -284,6 +284,12 @@ proc raiseMapped(call: var ClientCall; e: ref H2Error) {.noreturn.} =
     if code == 8 and call.st.deadlinePassed:
       # The server's copy of our deadline fired first and it reset the stream.
       call.fail(scDeadlineExceeded, "deadline exceeded")
+    if code == 7:
+      call.ended = true
+      call.st.release()
+      let refused = newGrpcError(scUnavailable, "stream reset with HTTP/2 error 7 (REFUSED_STREAM)")
+      refused.unprocessed = true
+      raise refused
     if code != 0: call.fail(rstToStatus(code), "stream reset with HTTP/2 error " & $code)
     call.fail(scUnavailable, e.msg)
   call.fail(scInternal, e.msg)
@@ -365,11 +371,8 @@ proc recv*(call: var ClientCall; msg: var seq[byte]): bool =
     call.finish()
     return false
 
-proc unaryCall*(ch: GrpcChannel; path: string; request: openArray[byte];
-                metadata: Metadata = @[]; timeoutMs = -1;
-                maxMessage = defaultMaxMessage; compression = ""): UnaryResult =
-  ## Sends one message and returns the one reply. Raises GrpcError for any
-  ## status other than OK.
+proc unaryOnce(ch: GrpcChannel; path: string; request: openArray[byte]; metadata: Metadata;
+               timeoutMs: int; maxMessage: int; compression: string): UnaryResult =
   inFlight(ch.p)
   var call = ch.newCall(path, metadata, timeoutMs, maxMessage, compression)
   var res: UnaryResult
@@ -386,3 +389,33 @@ proc unaryCall*(ch: GrpcChannel; path: string; request: openArray[byte];
   do:
     call.close()
   res
+
+const
+  refusedRetries* = 2        ## how many more times `unaryCall` sends a call the server refused
+  refusedBackoffMs = 20      ## the wait before the first of them, doubled for each next
+
+proc unaryCall*(ch: GrpcChannel; path: string; request: openArray[byte];
+                metadata: Metadata = @[]; timeoutMs = -1;
+                maxMessage = defaultMaxMessage; compression = ""): UnaryResult =
+  ## Sends one message and returns the one reply. Raises GrpcError for any
+  ## status other than OK. A call the server refused without starting on it (REFUSED_STREAM, or
+  ## a GOAWAY that came before it, as when a server drains or has not yet told its limits) is
+  ## sent again, on a new connection if the old one is going away, up to `refusedRetries` times,
+  ## within `timeoutMs`; the error then has `unprocessed` set. Calls that may have run are never
+  ## repeated.
+  let t0 = getMonoTime()
+  var attempt = 0
+  while true:
+    var left = timeoutMs
+    if timeoutMs >= 0:
+      left = max(0, timeoutMs - int((getMonoTime() - t0).inMilliseconds))
+    var failure: ref GrpcError
+    try:
+      return unaryOnce(ch, path, request, metadata, left, maxMessage, compression)
+    except GrpcError as e:
+      failure = e
+    if not failure.unprocessed or attempt >= refusedRetries or
+       (timeoutMs >= 0 and left <= refusedBackoffMs shl attempt):
+      raise failure
+    sleep(refusedBackoffMs shl attempt)
+    inc attempt

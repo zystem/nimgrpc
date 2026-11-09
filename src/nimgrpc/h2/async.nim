@@ -684,6 +684,42 @@ proc release*(st: AsyncH2Stream) =
 
 # ------------------------------------------------------------ client
 
+proc connectEyeballs*(addrs: seq[TransportAddress]; timeoutMs: int;
+                     staggerMs = eyeballDelayMs): Future[StreamTransport] {.async.} =
+  ## Happy Eyeballs (RFC 8305): the first address is tried; if it has not answered within
+  ## `staggerMs`, or has failed, the next is tried alongside it, and so on. The first to connect
+  ## wins; the others are cancelled. Each attempt gets `timeoutMs` (negative: no limit beyond the
+  ## system's). Raises the last error.
+  var pending: seq[Future[StreamTransport]]
+  var next = 0
+  var winner: StreamTransport
+  var lastErr: ref CatchableError
+  try:
+    while winner == nil and (next < addrs.len or pending.len > 0):
+      var timer: Future[void]
+      if next < addrs.len:
+        let attempt = connect(addrs[next], flags = {SocketFlags.TcpNoDelay})
+        pending.add(if timeoutMs >= 0: attempt.wait(timeoutMs.milliseconds) else: attempt)
+        inc next
+        if next < addrs.len: timer = sleepAsync(staggerMs.milliseconds)
+      var watch: seq[FutureBase]
+      for f in pending: watch.add FutureBase(f)
+      if timer != nil: watch.add FutureBase(timer)
+      discard await race(watch)
+      if timer != nil and not timer.finished: await timer.cancelAndWait()
+      var still: seq[Future[StreamTransport]]
+      for f in pending:
+        if not f.finished: still.add f
+        elif f.completed:
+          if winner == nil: winner = f.read
+          else: await f.read.closeWait()       # two connected at once: keep one
+        elif not f.cancelled: lastErr = f.error
+      pending = still
+  finally:
+    for f in pending: await f.cancelAndWait()
+  if winner == nil: raise lastErr
+  return winner
+
 const defaultConnectTimeoutMs* = 20_000
   ## How long `dial` waits for each address to accept the TCP connection.
 
@@ -696,21 +732,10 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   ## Each address gets `connectTimeoutMs` to accept the TCP connection (a
   ## negative value waits as long as the system does); past it the last
   ## address's `AsyncTimeoutError` is raised.
-  let addrs = resolveTAddress(stripBrackets(host), port)
+  let addrs = interleaveFamilies(resolveTAddress(stripBrackets(host), port),
+                                 proc (a: TransportAddress): bool = a.family == AddressFamily.IPv6)
   if addrs.len == 0: raise newException(TransportError, "cannot resolve " & host)
-  var transp: StreamTransport
-  var lastErr: ref CatchableError
-  for a in addrs:
-    try:
-      let attempt = connect(a, flags = {SocketFlags.TcpNoDelay})
-      transp = if connectTimeoutMs >= 0: await attempt.wait(connectTimeoutMs.milliseconds)
-               else: await attempt
-      break
-    except CancelledError as e:
-      raise e
-    except CatchableError as e:
-      lastErr = e
-  if transp == nil: raise lastErr
+  let transp = await connectEyeballs(addrs, connectTimeoutMs)
   setTcpKeepalive(cint(transp.fd), keepalive.tcpSecs)
   let c = newConn(transp, newClientSession(manualFlow = true), nil, keepalive)
   if tls != nil:

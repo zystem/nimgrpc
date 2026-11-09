@@ -220,6 +220,10 @@ proc mapped(call: AsyncCall; e: ref H2Error): ref GrpcError =
     let code = call.st.errorCode
     if code == 8 and call.st.deadlinePassed:
       return call.failure(scDeadlineExceeded, "deadline exceeded")
+    if code == 7:
+      let refused = call.failure(scUnavailable, "stream reset with HTTP/2 error 7 (REFUSED_STREAM)")
+      refused.unprocessed = true
+      return refused
     if code != 0: return call.failure(rstToStatus(code), "stream reset with HTTP/2 error " & $code)
     return call.failure(scUnavailable, e.msg)
   call.failure(scInternal, e.msg)
@@ -331,11 +335,8 @@ proc recv*(call: AsyncCall): Future[Option[seq[byte]]] {.async.} =
     err = e
   raise err
 
-proc unaryCall*(ch: AsyncChannel; path: string; request: seq[byte];
-                metadata: Metadata = @[]; timeoutMs = -1;
-                maxMessage = defaultMaxMessage; compression = ""): Future[UnaryResult] {.async.} =
-  ## Sends one message and returns the one reply. Raises GrpcError for any
-  ## status other than OK.
+proc unaryOnce(ch: AsyncChannel; path: string; request: seq[byte]; metadata: Metadata;
+               timeoutMs: int; maxMessage: int; compression: string): Future[UnaryResult] {.async.} =
   let call = await ch.newCall(path, metadata, timeoutMs, maxMessage, compression)
   var err: ref CatchableError
   try:
@@ -357,3 +358,32 @@ proc unaryCall*(ch: AsyncChannel; path: string; request: seq[byte];
     err = e
   call.close()
   if err != nil: raise err
+
+const
+  refusedRetries* = 2        ## how many more times `unaryCall` sends a call the server refused
+  refusedBackoffMs = 20      ## the wait before the first of them, doubled for each next
+
+proc unaryCall*(ch: AsyncChannel; path: string; request: seq[byte];
+                metadata: Metadata = @[]; timeoutMs = -1;
+                maxMessage = defaultMaxMessage; compression = ""): Future[UnaryResult] {.async.} =
+  ## Sends one message and returns the one reply. Raises GrpcError for any
+  ## status other than OK. A call the server refused without starting on it (REFUSED_STREAM, or
+  ## a GOAWAY that came before it) is sent again, on a new connection if the old one is going
+  ## away, up to `refusedRetries` times, within `timeoutMs`; calls that may have run are never
+  ## repeated.
+  let t0 = Moment.now()
+  var attempt = 0
+  while true:
+    var left = timeoutMs
+    if timeoutMs >= 0:
+      left = max(0, timeoutMs - int((Moment.now() - t0).milliseconds))
+    var failure: ref GrpcError
+    try:
+      return await unaryOnce(ch, path, request, metadata, left, maxMessage, compression)
+    except GrpcError as e:
+      failure = e
+    if not failure.unprocessed or attempt >= refusedRetries or
+       (timeoutMs >= 0 and left <= refusedBackoffMs shl attempt):
+      raise failure
+    await sleepAsync(chronos.milliseconds(refusedBackoffMs shl attempt))
+    inc attempt
