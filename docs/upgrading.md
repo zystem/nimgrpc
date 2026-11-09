@@ -6,12 +6,16 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 ## Unreleased
 
+## 0.3.0
+
 - **Connection age and idleness** (new, off by default): `Limits.maxConnectionAgeMs`, `maxConnectionIdleMs` and `maxConnectionAgeGraceMs` drain old or idle connections with GOAWAY. Nothing changes unless you set them; a client that does not redial after GOAWAY would fail its next call, which the clients of this library do not.
 
 - **nghttp2**: 1.61.0 or later is now required (was 1.57.0): earlier versions are open to the CONTINUATION flood (CVE-2024-28182). An older header fails the build, with a message saying so.
 - **Timeouts**: deadlines and timed waits of the blocking adapter count on the monotonic clock (Linux), so a step of the system clock no longer shortens or stretches them. Nothing to do.
-- **IPv6**: the blocking `dial` now tries IPv6 addresses of a name too (before, IPv4 only). A name with an AAAA record that leads nowhere costs up to `connectTimeoutMs` before the IPv4 address is tried: lower `connectTimeoutMs` or fix the record if that matters. A server listens on one family unless you pass `address = "::"` (both).
+- **IPv6**: the blocking `dial` now tries IPv6 addresses of a name too (before, IPv4 only). The addresses are tried as Happy Eyeballs (RFC 8305) says, the next one alongside the previous after 250 ms, so a name with an AAAA record that leads nowhere costs about a quarter of a second, not `connectTimeoutMs`. A server listens on one family unless you pass `address = "::"` (both).
 - **Handshake limit and TCP keepalive**: a server now closes a connection that has not completed the TLS handshake and sent its HTTP/2 preface and first SETTINGS within two minutes (`Limits.handshakeTimeoutMs`; 0 turns it off), and every connection gets the system's TCP keepalive after 15 seconds of silence (`Keepalive.tcpSecs`; 0 turns it off). A client that is slower than two minutes to start talking must raise the limit.
+
+- **Retries**: `unaryCall` sends a call again (twice at most, within its deadline) when the server refused it without starting on it; `GrpcError.unprocessed` tells such an error. Streaming calls are not retried. Nothing to do; a program that retried UNAVAILABLE itself may now see a call arrive later than before.
 
 ## 0.2.1
 
