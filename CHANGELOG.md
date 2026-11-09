@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-11-09
+
 ### Security
 - nghttp2 1.61.0 or later is required (was 1.57.0), which limits the CONTINUATION flood (CVE-2024-28182); the build fails with an `#error` against an older header. The limits that nghttp2 applies by default to CONTINUATION frames (8 after a HEADERS frame) and to RST_STREAM (a burst of 1000, then 33 a second: Rapid Reset, CVE-2023-44487) are now set by the library itself, and `tests/th2session.nim` feeds a server the frames of a flood.
 
