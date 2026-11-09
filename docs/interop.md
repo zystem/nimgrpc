@@ -110,3 +110,14 @@ tests/interop/ainterop client 127.0.0.1 10012
 ./peer -addr 127.0.0.1:10010              # grpc-go client against the Nim server
 tests/interop/interop client 127.0.0.1 10011
 ```
+
+## Health checking against grpc-go
+
+`tests/interop/health_interop.sh` builds grpc-go's own health client (`tests/interop/gohealth`,
+the official `grpc_health_v1` stubs) and `tests/interop/healthserver.nim` and runs the one against
+the other: `Check` of the server and of a service, NOT_FOUND for a name nobody set, `List`, and
+`Watch` of a name that is unknown at first (SERVICE_UNKNOWN), becomes SERVING, and turns
+NOT_SERVING at `shutdown`. It needs Go 1.25 or later (grpc-go 1.84) and the module:
+`GOTOOLCHAIN=go1.26.10 GOFLAGS=-mod=mod tests/interop/health_interop.sh`, with
+`GOPROXY=off` if the module is in the local cache. Result (grpc-go 1.84.0, 2026-11-09): all
+seven checks pass.

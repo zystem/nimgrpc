@@ -35,8 +35,11 @@ type
     version: int          ## raised by every change, so that a `Watch` sees there was one
     shuttingDown: bool
 
-  Health* = ref HealthObj
-    ## The statuses of the services of a server. Keep it alive as long as the server runs.
+  Health* = object
+    ## The statuses of the services of a server: a handle to memory shared by every thread, so it
+    ## may be copied, passed to threads and used from any of them. It lives until `close`, which
+    ## is optional for a server that runs as long as the program.
+    p: ptr HealthObj
 
 const
   checkPath* = "/grpc.health.v1.Health/Check"
@@ -46,41 +49,48 @@ const
 
 proc newHealth*(): Health =
   ## A health service that says SERVING for the server as a whole (the empty name).
-  result = Health()
-  initLock(result.lock)
-  result.statuses = {"": hsServing}.toTable
+  let p = createShared(HealthObj)
+  initLock(p.lock)
+  p.statuses = {"": hsServing}.toTable
+  Health(p: p)
+
+proc close*(h: Health) =
+  ## Frees the health service. Only when no server that registered it is running.
+  deinitLock(h.p.lock)
+  `=destroy`(h.p[])
+  deallocShared(h.p)
 
 proc setStatus*(h: Health; service: string; status: HealthStatus) =
   ## Sets the status of `service` ("" is the server as a whole). Ignored after `shutdown`.
-  acquire(h.lock)
-  if not h.shuttingDown and h.statuses.getOrDefault(service, hsServiceUnknown) != status:
-    h.statuses[service] = status
-    inc h.version
-  release(h.lock)
+  acquire(h.p.lock)
+  if not h.p.shuttingDown and h.p.statuses.getOrDefault(service, hsServiceUnknown) != status:
+    h.p.statuses[service] = status
+    inc h.p.version
+  release(h.p.lock)
 
 proc clearStatus*(h: Health; service: string) =
   ## Forgets `service`: it is unknown again (`Check` answers NOT_FOUND).
-  acquire(h.lock)
-  if not h.shuttingDown and service in h.statuses:
-    h.statuses.del service
-    inc h.version
-  release(h.lock)
+  acquire(h.p.lock)
+  if not h.p.shuttingDown and service in h.p.statuses:
+    h.p.statuses.del service
+    inc h.p.version
+  release(h.p.lock)
 
 proc shutdown*(h: Health) =
   ## Every service becomes NOT_SERVING and stays so: `setStatus` no longer changes anything.
   ## Call it first when the server is going down, so that load balancers and probes stop sending
   ## traffic before `stop` ends the calls.
-  acquire(h.lock)
-  for k, v in h.statuses.mpairs: v = hsNotServing
-  h.shuttingDown = true
-  inc h.version
-  release(h.lock)
+  acquire(h.p.lock)
+  for k, v in h.p.statuses.mpairs: v = hsNotServing
+  h.p.shuttingDown = true
+  inc h.p.version
+  release(h.p.lock)
 
 proc statusOf*(h: Health; service: string): HealthStatus =
   ## The status of `service`; `hsServiceUnknown` if nobody set it.
-  acquire(h.lock)
-  result = h.statuses.getOrDefault(service, hsServiceUnknown)
-  release(h.lock)
+  acquire(h.p.lock)
+  result = h.p.statuses.getOrDefault(service, hsServiceUnknown)
+  release(h.p.lock)
 
 # ---------------------------------------------------------------- the messages
 
@@ -204,8 +214,7 @@ proc rawList(ctx: var ServerContext; request: seq[byte]; userData: pointer): seq
 
 proc register*(srv: GrpcServer; h: Health) =
   ## Adds `Check` and `Watch` to a blocking server (before `start`).
-  GC_ref(h)                          # the handlers reach it through a pointer
-  let p = cast[pointer](h)
+  let p = cast[pointer](h.p)
   srv.addUnaryRaw(checkPath, rawCheck, p)
   srv.addStreamingRaw(watchPath, rawWatch, p)
   srv.addUnaryRaw(listPath, rawList, p)
@@ -214,7 +223,7 @@ proc register*(srv: GrpcServer; h: Health) =
 
 proc register*(srv: AsyncGrpcServer; h: Health) =
   ## Adds `Check` and `Watch` to a chronos server (before `start`).
-  let hp = cast[ptr HealthObj](h)
+  let hp = h.p
   proc check(ctx: AsyncServerContext; request: seq[byte]): Future[seq[byte]] {.async.} =
     let service = requested(request)
     acquire(hp.lock)
@@ -242,7 +251,6 @@ proc register*(srv: AsyncGrpcServer; h: Health) =
     ctx.checkCancelled()
   proc list(ctx: AsyncServerContext; request: seq[byte]): Future[seq[byte]] {.async.} =
     return encodeHealthList(snapshot(hp))
-  GC_ref(h)
   srv.addUnary(checkPath, check)
   srv.addStreaming(watchPath, watch)
   srv.addUnary(listPath, list)

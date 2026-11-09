@@ -108,6 +108,8 @@ adds the standard `grpc.health.v1.Health` service (`Check`, `Watch`, `List`) to 
 chronos server, which is what the native `grpc` probe of Kubernetes, Envoy and
 `grpc_health_probe` call. The server as a whole (name "") is SERVING; `health.setStatus(name,
 hsNotServing)` sets a service; `health.shutdown()` makes everything NOT_SERVING before `stop`.
+The other side is `import nimgrpc/healthclient`: `ch.checkHealth(service)`, `ch.isServing()`,
+`ch.waitServing(timeoutMs = 10_000)` and `ch.watchHealth()` on a blocking or a chronos channel.
 
 Cancellation: a handler's thread cannot be interrupted, and `stop` waits for
 handlers to return. Long handlers should therefore notice when their call is
