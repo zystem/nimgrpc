@@ -12,6 +12,9 @@ $PROTOC --plugin=protoc-gen-nim=tools/protoc-gen-nim --nim_out=tests/gen -Itests
 $PROTOC --plugin=protoc-gen-nim=tools/protoc-gen-nim --nim_out=tests/gen --nim_opt=blocking,async \
   -I"$GRPC_PROTO" \
   grpc/testing/empty.proto grpc/testing/messages.proto grpc/testing/test.proto
+# the one with a service and a descriptor constant, for the reflection tests
+$PROTOC --plugin=protoc-gen-nim=tools/protoc-gen-nim --nim_out=tests/gen --nim_opt=blocking,async,descriptor \
+  -Itests/proto echo.proto
 (cd tests/proto &&
  $PROTOC --encode=codec.test.Everything -I. codec.proto < fixture.txtpb > everything.bin &&
  $PROTOC --encode=codec.legacy.Legacy -I. legacy.proto < legacy.txtpb > legacy.bin &&
