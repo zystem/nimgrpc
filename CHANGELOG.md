@@ -8,6 +8,7 @@
 - `Health/Watch` and server reflection on the blocking server keep a worker per call for as long as the client stays: `newHealth(maxWatches = 64)` and `newReflection(maxStreams = 16)` now limit how many run at once (one more gets RESOURCE_EXHAUSTED; 0 for no limit). `Check` and `List` are not limited.
 
 ### Added
+- CI runs the tests, plain and under AddressSanitizer, on Nim 2.4.0 too (besides 2.2.12 and 2.2.14).
 - `Limits.maxCallMs` (both servers; 0, off, by default): the longest a call may last whatever deadline the client asked for. Past it the server resets the call (the handler sees DEADLINE_EXCEEDED, the client CANCELLED). It bounds a streaming call that a client opens and leaves quiet.
 - `Limits.maxConnectionsPerIp` (both servers; 0, off, by default): connections served at once from one address; one more is closed at once.
 - `tests/thostile.nim`: calls left without a message, large unary messages side by side, `maxCallMs`, the limits of `Watch` and reflection, `maxConnectionsPerIp`; `tests/tblocking.nim`: a stream nobody reads holds one window and the other streams go on.
