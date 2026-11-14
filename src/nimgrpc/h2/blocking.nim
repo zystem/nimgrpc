@@ -183,6 +183,7 @@ proc `=destroy`(c: ConnObj) =
   `=destroy`(c.outQ.addr[])
   `=destroy`(c.streams.addr[])
   `=destroy`(c.failure.addr[])
+  `=destroy`(c.peer.addr[])
   `=destroy`(c.tls.addr[])
   `=destroy`(c.tlsConf.addr[])
   `=destroy`(c.plainOut.addr[])
