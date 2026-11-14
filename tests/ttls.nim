@@ -278,3 +278,48 @@ suite "session resumption":
       ch.echoOnce()
       ch.close()
     srv.stop()
+
+suite "a configuration shared between threads":
+  test "a shared object resumes the sessions of the one it was made from, and the original may go first":
+    let sc = tlsServerConfig(pem"server.pem", pem"server.key")
+    var cc = tlsClientConfig(pem"ca.pem")
+    let sh = cc.share
+    let a = connect(cc, sc)
+    a.c.checkPeer(); a.s.checkPeer()
+    check not a.c.resumed
+    cc = nil                                  # the object that built it is gone, the shared one still holds the configuration
+    GC_fullCollect()
+    let b = connect(sh, sc)
+    b.c.checkPeer(); b.s.checkPeer()
+    check b.c.resumed and b.s.resumed          # the same sessions: a share is not a new configuration
+
+  test "a connection keeps the configuration alive after every object that points at it is gone":
+    let sc = tlsServerConfig(pem"server.pem", pem"server.key")
+    var cc = tlsClientConfig(pem"ca.pem")
+    let a = connect(cc, sc)
+    cc = nil
+    GC_fullCollect()
+    a.c.checkPeer(); a.s.checkPeer()          # the trust anchors are still there for the check at the end of the handshake
+
+  test "many threads, each with a share of one configuration, make connections for a while":
+    var sc = tlsServerConfig(pem"server.pem", pem"server.key")
+    var master = tlsClientConfig(pem"ca.pem")
+    type Job = tuple[m: ptr TlsConfig, s: ptr TlsConfig, ok: ptr int]
+    var oks: array[8, int]
+    var jobs: array[8, Job]
+    var th: array[8, Thread[ptr Job]]
+    proc work(j: ptr Job) {.thread.} =
+      {.cast(gcsafe).}:
+        var n = 0
+        for _ in 0 ..< 400:
+          let mine = j.m[].share            # this thread's own object
+          let c = newClientTls(mine, "localhost")
+          let s = newServerTls(j.s[].share)
+          handshake(c, s)
+          if c.handshakeDone: inc n
+        j.ok[] = n
+    for i in 0 ..< 8:
+      jobs[i] = (addr master, addr sc, addr oks[i])
+      createThread(th[i], work, addr jobs[i])
+    joinThreads(th)
+    for i in 0 ..< 8: check oks[i] == 400
