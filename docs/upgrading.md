@@ -6,6 +6,8 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 ## Unreleased
 
+## 0.4.0
+
 - **Handshake limit**: `Limits.handshakeTimeoutMs` is 20 s by default (was 120 s). A client that needs longer than that to finish TLS and send its first SETTINGS is cut off: raise the limit for such clients.
 - **`Health/Watch` and reflection on the blocking server** are limited to 64 and 16 calls at once (`newHealth(maxWatches = ...)`, `newReflection(maxStreams = ...)`; 0 for no limit). A server whose clients all watch its health needs a larger `maxWatches` and as many workers, or the chronos server, where a `Watch` costs no thread.
 - **Unary calls on the blocking server** start their handler when the request message has arrived, not when the HEADERS did. Nothing to change. One difference can be seen: a message larger than `maxMessage` is refused once that many bytes have arrived, not at its first bytes.
