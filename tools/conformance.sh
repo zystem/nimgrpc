@@ -2,9 +2,12 @@
 # What other people's tools say about the servers: h2spec against both HTTP/2 adapters, and
 # grpcurl (a real client of server reflection) against tools/hostiletarget.
 #   tools/conformance.sh
-# Needs h2spec and grpcurl on PATH (go install github.com/summerwind/h2spec/cmd/h2spec@v2.6.0,
-# go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.3). Environment: NIMFLAGS, PORT.
+# Needs h2spec 2.6.0 and grpcurl on PATH (.github/workflows/hostile.yml shows how CI builds
+# them). Environment: NIMFLAGS, PORT.
 set -u
+for tool in h2spec grpcurl; do
+  command -v "$tool" > /dev/null || { echo "$tool is not on PATH" >&2; exit 2; }
+done
 cd "$(dirname "$0")/.."
 PORT=${PORT:-47200}
 OUT=${OUT:-conformance-out}

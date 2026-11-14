@@ -42,7 +42,12 @@ jobs:
       - name: h2spec and grpcurl (built from source; the Go checksum database verifies the modules)
         if: always()
         run: |
-          go install github.com/summerwind/h2spec/cmd/h2spec@v2.6.0
+          # h2spec 2.6.0 cannot be installed with `go install` (its module path has no /v2):
+          # built from its repository at the commit of the tag
+          git init -q /tmp/h2spec-src
+          git -C /tmp/h2spec-src fetch -q --depth 1 https://github.com/summerwind/h2spec 70ac2294010887f48b18e2d64f5cccd48421fad1
+          git -C /tmp/h2spec-src checkout -q FETCH_HEAD
+          (cd /tmp/h2spec-src && go build -o "$(go env GOPATH)/bin/h2spec" ./cmd/h2spec)
           go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.3
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Conformance
