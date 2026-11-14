@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- CI runs the tests, plain and under AddressSanitizer, on Nim 2.4.0 too (besides 2.2.12 and 2.2.14).
+
 ## 0.3.1 — 2026-11-14
 
 ### Security

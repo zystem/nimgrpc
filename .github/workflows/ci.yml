@@ -20,11 +20,13 @@ jobs:
       fail-fast: false
       matrix:
         mode: [plain, asan, coverage]
-        # the oldest Nim that nimgrpc.nimble allows, and the current stable one (Renovate moves the second)
-        nim: ["2.2.12", "2.2.14"]
+        # the oldest Nim that nimgrpc.nimble allows, the last 2.2 and the current stable one
+        nim: ["2.2.12", "2.2.14", "2.4.0"]
         exclude:
           - mode: coverage          # one Nim version is enough for the coverage figure
             nim: "2.2.14"
+          - mode: coverage
+            nim: "2.4.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
