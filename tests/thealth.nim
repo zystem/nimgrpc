@@ -51,7 +51,8 @@ suite "the messages":
 
   test "Check with such a request is INVALID_ARGUMENT and the server goes on":
     let srv = newGrpcServer()
-    srv.register(newHealth())
+    let h = newHealth()
+    srv.register(h)
     srv.start()
     let ch = bc.dial("127.0.0.1", srv.port)
     var code = scOk
@@ -61,6 +62,7 @@ suite "the messages":
     check ch.checkOf("") == hsServing
     ch.close()
     srv.stop()
+    h.close()
 
 suite "the blocking server":
   test "Check: the server as a whole is SERVING, a service is what was set, a stranger is NOT_FOUND":
