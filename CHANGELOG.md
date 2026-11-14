@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-11-15
+
 ### Security
 - Blocking adapter (server and client): received body bytes were acknowledged to the peer as soon as they arrived, so a stream whose reader did not read grew without limit: 300 MB sent on one `Health/Watch` call, whose handler reads one message and no more, took a server to 587 MB (found by a local pentest, 2026-11-14). Flow control is now manual, as on the chronos adapter: the window of a stream reopens only as its reader takes the bytes (one stream holds at most 1 MiB unread), and the window of the connection reopens at once until 8 MiB wait unread in all its streams.
 - Blocking server: a client could use up every worker thread without sending a message. Each call took a worker when its HEADERS arrived, so 400 calls opened and left alone on 4 connections stopped a server with the default 256 workers for everybody (same pentest). A unary call now takes its worker only when its request message has arrived; a call that waits costs no thread. Streaming calls still take a worker from their start; what bounds them is below.
