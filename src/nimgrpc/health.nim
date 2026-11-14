@@ -17,7 +17,7 @@
 ## Thread-safe: set statuses from any thread.
 
 import std/[locks, tables, options]
-import ./protobuf, ./status, ./server, ./asyncserver
+import ./protobuf, ./status, ./server, ./asyncserver, ./cleanup
 import pkg/chronos
 
 export status
@@ -34,6 +34,8 @@ type
     statuses: Table[string, HealthStatus]
     version: int          ## raised by every change, so that a `Watch` sees there was one
     shuttingDown: bool
+    watchers: int         ## `Watch` calls running on blocking servers
+    maxWatches: int
 
   Health* = object
     ## The statuses of the services of a server: a handle to memory shared by every thread, so it
@@ -47,10 +49,14 @@ const
   listPath* = "/grpc.health.v1.Health/List"
   watchPollMs = 200      ## how often a `Watch` looks for a change
 
-proc newHealth*(): Health =
+proc newHealth*(maxWatches = 64): Health =
   ## A health service that says SERVING for the server as a whole (the empty name).
+  ## On a blocking server every `Watch` keeps a worker thread for as long as its client stays,
+  ## so at most `maxWatches` of them run at once and one more is answered RESOURCE_EXHAUSTED
+  ## (0: no limit); `Check` and `List` are not affected, and neither is the chronos server.
   let p = createShared(HealthObj)
   initLock(p.lock)
+  p.maxWatches = maxWatches
   p.statuses = {"": hsServing}.toTable
   Health(p: p)
 
@@ -195,18 +201,29 @@ proc rawWatch(ctx: var ServerContext; call: var ServerCall; userData: pointer)
   var request: seq[byte]
   if not call.recv(request): raise newGrpcError(scInvalidArgument, "no HealthCheckRequest")
   let service = requested(request)
+  acquire(h.lock)
+  let admitted = h.maxWatches <= 0 or h.watchers < h.maxWatches
+  if admitted: inc h.watchers
+  release(h.lock)
+  if not admitted:
+    raise newGrpcError(scResourceExhausted, "too many Watch calls; use Check, or try later")
   var sent = -1
   var last = hsUnknown
-  while true:
+  withCleanup:
+    while true:
+      acquire(h.lock)
+      let version = h.version
+      let st = h.statuses.getOrDefault(service, hsServiceUnknown)
+      release(h.lock)
+      if version != sent and (sent < 0 or st != last):
+        call.send(encodeHealthResponse(st))
+        last = st
+      sent = version
+      ctx.sleep(watchPollMs)         # raises once the client has gone, or the deadline passed
+  do:
     acquire(h.lock)
-    let version = h.version
-    let st = h.statuses.getOrDefault(service, hsServiceUnknown)
+    dec h.watchers
     release(h.lock)
-    if version != sent and (sent < 0 or st != last):
-      call.send(encodeHealthResponse(st))
-      last = st
-    sent = version
-    ctx.sleep(watchPollMs)           # raises once the client has gone, or the deadline passed
 
 proc rawList(ctx: var ServerContext; request: seq[byte]; userData: pointer): seq[byte]
     {.nimcall, gcsafe, raises: [CatchableError].} =

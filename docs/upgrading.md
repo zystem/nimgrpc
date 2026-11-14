@@ -6,6 +6,12 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 ## Unreleased
 
+- **Handshake limit**: `Limits.handshakeTimeoutMs` is 20 s by default (was 120 s). A client that needs longer than that to finish TLS and send its first SETTINGS is cut off: raise the limit for such clients.
+- **`Health/Watch` and reflection on the blocking server** are limited to 64 and 16 calls at once (`newHealth(maxWatches = ...)`, `newReflection(maxStreams = ...)`; 0 for no limit). A server whose clients all watch its health needs a larger `maxWatches` and as many workers, or the chronos server, where a `Watch` costs no thread.
+- **Unary calls on the blocking server** start their handler when the request message has arrived, not when the HEADERS did. Nothing to change. One difference can be seen: a message larger than `maxMessage` is refused once that many bytes have arrived, not at its first bytes.
+- **Flow control of the blocking adapter** is manual now: a handler (or a client) that stops reading a stream stops its peer after 1 MiB. Nothing to change in a program that reads what it is sent.
+- **Facing clients you do not trust** (new settings, off by default): set `Limits.maxCallMs` unless the server has calls that are meant to stay open, `Limits.maxConnectionsPerIp` where clients connect directly (not behind a proxy that hides their addresses), and `maxConnections`.
+
 ## 0.3.1
 
 - **Nesting limit**: a message nested deeper than 100 levels (`maxNestingDepth` in `nimgrpc/protobuf`), counting sub-messages and groups, is now rejected with `ProtobufError`; a server answers INTERNAL. Real messages are far shallower (protobuf-go and C++ protobuf use the same limit). Hand-written code that builds a `PbReader` for a nested message from copied bytes should use `childReader` (or `subReader`) so that the depth carries over. The generator did not change, so generated code does not have to be regenerated for this (regenerate as usual with each release).

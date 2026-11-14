@@ -2,8 +2,20 @@
 
 ## Unreleased
 
+### Security
+- Blocking adapter (server and client): received body bytes were acknowledged to the peer as soon as they arrived, so a stream whose reader did not read grew without limit: 300 MB sent on one `Health/Watch` call, whose handler reads one message and no more, took a server to 587 MB (found by a local pentest, 2026-11-14). Flow control is now manual, as on the chronos adapter: the window of a stream reopens only as its reader takes the bytes (one stream holds at most 1 MiB unread), and the window of the connection reopens at once until 8 MiB wait unread in all its streams.
+- Blocking server: a client could use up every worker thread without sending a message. Each call took a worker when its HEADERS arrived, so 400 calls opened and left alone on 4 connections stopped a server with the default 256 workers for everybody (same pentest). A unary call now takes its worker only when its request message has arrived; a call that waits costs no thread. Streaming calls still take a worker from their start; what bounds them is below.
+- `Health/Watch` and server reflection on the blocking server keep a worker per call for as long as the client stays: `newHealth(maxWatches = 64)` and `newReflection(maxStreams = 16)` now limit how many run at once (one more gets RESOURCE_EXHAUSTED; 0 for no limit). `Check` and `List` are not limited.
+
 ### Added
 - CI runs the tests, plain and under AddressSanitizer, on Nim 2.4.0 too (besides 2.2.12 and 2.2.14).
+- `Limits.maxCallMs` (both servers; 0, off, by default): the longest a call may last whatever deadline the client asked for. Past it the server resets the call (the handler sees DEADLINE_EXCEEDED, the client CANCELLED). It bounds a streaming call that a client opens and leaves quiet.
+- `Limits.maxConnectionsPerIp` (both servers; 0, off, by default): connections served at once from one address; one more is closed at once.
+- `tests/thostile.nim`: calls left without a message, large unary messages side by side, `maxCallMs`, the limits of `Watch` and reflection, `maxConnectionsPerIp`; `tests/tblocking.nim`: a stream nobody reads holds one window and the other streams go on.
+
+### Changed
+- `Limits.handshakeTimeoutMs` is 20 seconds by default (was 120): on the blocking server a connection costs two threads from the moment it is accepted, and one that sends nothing kept them for two minutes.
+- The blocking server no longer ends the program when the system refuses a new thread: the call or the connection waits for a thread that exists.
 
 ## 0.3.1 — 2026-11-14
 

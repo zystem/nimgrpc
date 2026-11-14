@@ -48,6 +48,7 @@ type
   AsyncH2Conn* = ref object
     transp: StreamTransport
     sess: H2Session
+    peer: string               ## server: the address of the client, for `Limits.maxConnectionsPerIp`
     tls: TlsConn
     tlsConf: TlsConfig
     tlsIn: seq[byte]
@@ -829,11 +830,22 @@ proc newAsyncStreamServer*(handler: AsyncStreamHandler; userData: pointer = nil;
     if s.limits.maxConnections > 0 and s.conns.len >= s.limits.maxConnections:
       await transp.closeWait()         # over the limit: the peer sees a closed connection
       return
+    var peer = ""
+    if s.limits.maxConnectionsPerIp > 0:
+      try: peer = transp.remoteAddress.host
+      except CatchableError: discard
+      var same = 0
+      for other in s.conns:
+        if other.peer == peer: inc same
+      if same >= s.limits.maxConnectionsPerIp:
+        await transp.closeWait()       # this address has its share already
+        return
     var c: AsyncH2Conn
     try:
       c = newConn(transp, newServerSession(
         manualFlow = true, maxConcurrentStreams = s.limits.maxConcurrentStreams), s, s.ka)
       c.maxBuffer = s.limits.maxConnectionBuffer
+      c.peer = peer
       c.handshakeMs = s.limits.handshakeTimeoutMs
       c.maxAgeMs = s.limits.maxConnectionAgeMs
       c.maxIdleMs = s.limits.maxConnectionIdleMs

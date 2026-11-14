@@ -123,3 +123,39 @@ suite "blocking h2 over tcp":
     check epochTime() - t0 < 0.2
     joinThread(th)
     c.close()
+
+proc deafOrEcho(st: var ServerStream; ud: pointer) {.nimcall, gcsafe, raises: [].} =
+  ## "/deaf" never reads its body; anything else is echoed.
+  try:
+    if st.headers.header(":path") == "/deaf":
+      discard st.waitClosed(5000)
+      return
+    let req = st.readRequest()
+    st.respond(Reply(headers: @[(":status", "200")], body: req.body,
+                     trailers: @[("grpc-status", "0")]))
+  except CatchableError: discard
+
+suite "flow control of the blocking adapter":
+  test "a stream nobody reads holds one window; the other streams of the connection go on":
+    let s = newStreamServer(deafOrEcho, nil)
+    s.start()
+    let c = dial("127.0.0.1", s.port)
+    type Arg = tuple[c: ptr Conn; port: Port; timedOut: ptr bool]
+    proc flood(a: Arg) {.thread.} =
+      var st = a.c[].openStream(reqHeaders(a.port, "/deaf"), timeoutMs = 1500)
+      try: st.send(newSeq[byte](8_000_000))      # eight windows: must stop after one
+      except H2Timeout: a.timedOut[] = true
+      except CatchableError: discard
+      st.release()
+    var timedOut = false
+    var th: Thread[Arg]
+    createThread(th, flood, (c.addr, s.port, timedOut.addr))
+    sleep(300)                                   # the deaf stream is full by now
+    let t0 = epochTime()
+    let r = c.request(reqHeaders(s.port, "/echo"), newSeq[byte](3_000_000), timeoutMs = 5000)
+    check r.body.len == 3_000_000
+    check epochTime() - t0 < 1.0
+    joinThread(th)
+    check timedOut
+    c.close()
+    s.stop()

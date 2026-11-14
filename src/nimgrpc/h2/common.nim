@@ -43,7 +43,12 @@ type
     maxConnections*: int = 0
       ## Connections served at once; a connection past the limit is closed
       ## at once. 0 means no limit.
-    handshakeTimeoutMs*: int = 120_000
+    maxConnectionsPerIp*: int = 0
+      ## Connections served at once from one address; one more from it is closed at once. It
+      ## keeps a single client from taking every connection (and, on the blocking server, the
+      ## two threads each one costs). 0 means no limit, which is right behind a proxy or a load
+      ## balancer that hides the clients' addresses; set it where clients connect directly.
+    handshakeTimeoutMs*: int = 20_000
       ## A connection that has not completed the TLS handshake and sent the HTTP/2 preface and
       ## its first SETTINGS this long after it was accepted is closed. 0 means no limit.
     maxConnectionAgeMs*: int = 0
@@ -59,6 +64,13 @@ type
     maxConnectionIdleMs*: int = 0
       ## A connection with no call in progress for this long gets GOAWAY and is closed. 0 means
       ## no limit.
+    maxCallMs*: int = 0
+      ## The longest a call may last, whatever deadline the client asked for (and when it asked
+      ## for none): past it the server resets the call, which the handler sees as
+      ## DEADLINE_EXCEEDED and the client as CANCELLED. It bounds how long a client
+      ## can keep a call, and on the blocking server its worker thread, by opening a streaming
+      ## call and going quiet. 0 means no limit: set it unless the server has calls that are
+      ## meant to stay open.
     maxConnectionBuffer*: int = 16 * 1024 * 1024
       ## Body bytes that handlers have queued on all the streams of one
       ## connection and the socket has not taken; a sender waits above it.

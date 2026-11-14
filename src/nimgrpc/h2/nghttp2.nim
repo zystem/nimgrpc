@@ -148,6 +148,8 @@ proc nghttp2_session_consume*(session: ptr Nghttp2Session; streamId: int32;
   size: csize_t): cint
 proc nghttp2_session_consume_connection*(session: ptr Nghttp2Session;
   size: csize_t): cint
+proc nghttp2_session_consume_stream*(session: ptr Nghttp2Session; streamId: int32;
+  size: csize_t): cint
 proc nghttp2_session_del*(session: ptr Nghttp2Session)
 
 proc nghttp2_session_mem_recv2*(session: ptr Nghttp2Session; data: ptr uint8;

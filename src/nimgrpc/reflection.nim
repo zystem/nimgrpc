@@ -17,7 +17,7 @@
 ## together with the files it imports that the reflection holds. Extensions are not supported.
 
 import std/[locks, tables, options]
-import ./protobuf, ./status, ./server, ./asyncserver, ./wktdescriptors
+import ./protobuf, ./status, ./server, ./asyncserver, ./wktdescriptors, ./cleanup
 import pkg/chronos
 
 export status
@@ -33,6 +33,8 @@ type
     files: Table[string, FileInfo]
     symbols: Table[string, string]       ## full name -> name of the file that declares it
     contexts: seq[pointer]               ## the `ReflContext`s of the blocking servers it was registered with
+    streams: int                         ## reflection calls running on blocking servers
+    maxStreams: int
 
   Reflection* = object
     ## The descriptors a server can describe: a handle to memory shared by every thread, usable
@@ -183,11 +185,14 @@ proc indexFile(data: openArray[byte]): (FileInfo, seq[string]) =
 
 # ---------------------------------------------------------------- the registry
 
-proc newReflection*(wellKnownTypes = true): Reflection =
+proc newReflection*(wellKnownTypes = true; maxStreams = 16): Reflection =
   ## An empty reflection; with `wellKnownTypes` it holds google/protobuf/*.proto, which messages
-  ## that use a Timestamp or an Any import.
+  ## that use a Timestamp or an Any import. On a blocking server a reflection call keeps a worker
+  ## thread while its client holds it open, so at most `maxStreams` run at once and one more is
+  ## answered RESOURCE_EXHAUSTED (0: no limit); the chronos server is not affected.
   let p = createShared(ReflectionObj)
   initLock(p.lock)
+  p.maxStreams = maxStreams
   result = Reflection(p: p)
   if wellKnownTypes:
     for (name, data) in wellKnownDescriptors:
@@ -349,9 +354,20 @@ proc answer(refl: ptr ReflectionObj; services: seq[string]; raw: seq[byte]): seq
 proc rawInfo(ctx: var ServerContext; call: var ServerCall; userData: pointer)
     {.nimcall, gcsafe, raises: [CatchableError].} =
   let c = cast[ptr ReflContext](userData)
-  var msg: seq[byte]
-  while call.recv(msg):
-    call.send(answer(c.refl, servicesIn(c.registry), msg))
+  acquire(c.refl.lock)
+  let admitted = c.refl.maxStreams <= 0 or c.refl.streams < c.refl.maxStreams
+  if admitted: inc c.refl.streams
+  release(c.refl.lock)
+  if not admitted:
+    raise newGrpcError(scResourceExhausted, "too many reflection calls; try later")
+  withCleanup:
+    var msg: seq[byte]
+    while call.recv(msg):
+      call.send(answer(c.refl, servicesIn(c.registry), msg))
+  do:
+    acquire(c.refl.lock)
+    dec c.refl.streams
+    release(c.refl.lock)
 
 proc register*(srv: GrpcServer; r: Reflection) =
   ## Adds the reflection service (v1 and v1alpha) to a blocking server. Register it after the

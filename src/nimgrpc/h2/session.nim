@@ -273,6 +273,19 @@ proc consume*(s: H2Session; streamId: int32; n: int) =
     # The stream may have closed since the data arrived; that is not an error.
     if rs != 0 and rs != NGHTTP2_ERR_INVALID_ARGUMENT: raiseH2(rs, "consume")
 
+proc consumeConnection*(s: H2Session; n: int) =
+  ## Manual flow control: credits the connection window alone with `n` received bytes.
+  if n <= 0: return
+  let rc = nghttp2_session_consume_connection(s.raw, n.csize_t)
+  if rc != 0: raiseH2(rc, "consume_connection")
+
+proc consumeStream*(s: H2Session; streamId: int32; n: int) =
+  ## Manual flow control: credits the window of one stream alone. A stream that has closed
+  ## since the data arrived is not an error.
+  if n <= 0: return
+  let rc = nghttp2_session_consume_stream(s.raw, streamId, n.csize_t)
+  if rc != 0 and rc != NGHTTP2_ERR_INVALID_ARGUMENT: raiseH2(rc, "consume_stream")
+
 proc recv*(s: H2Session; data: openArray[byte]) =
   ## Feeds bytes read from the transport. Raises H2Error on a fatal
   ## connection error (the caller should then send `takeOutput` and close).
