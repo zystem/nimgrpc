@@ -9,6 +9,13 @@ const
   defaultMaxMessage* = 4 * 1024 * 1024
   grpcContentType* = "application/grpc"
 
+proc isGrpcContentType*(v: string): bool {.raises: [].} =
+  ## "application/grpc", optionally followed by "+subtype" or ";parameters"
+  ## (`application/grpc+proto`, `application/grpc;charset=utf-8`); a longer
+  ## media type such as `application/grpcx` is not gRPC.
+  v.startsWith(grpcContentType) and
+    (v.len == grpcContentType.len or v[grpcContentType.len] in {'+', ';'})
+
 # ---------------------------------------------------------------- messages
 
 proc encodeMessage*(msg: openArray[byte]; compressed = false): seq[byte] =

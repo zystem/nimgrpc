@@ -47,6 +47,7 @@ proc gtls_close(t: GtlsConnP)
 proc gtls_alpn(t: GtlsConnP): cstring
 proc gtls_peer_ok(t: GtlsConnP): cint
 proc gtls_resumed(t: GtlsConnP): cint
+proc gtls_alpn_refused(t: GtlsConnP): cint
 {.pop.}
 
 const
@@ -175,6 +176,7 @@ proc isClosed*(t: TlsConn): bool = (gtls_state(t.raw) and stClosed) != 0
 proc errorMessage*(t: TlsConn): string =
   ## Why the session failed, from BearSSL's error code.
   let e = gtls_last_error(t.raw).int
+  if gtls_alpn_refused(t.raw) != 0: return "peer did not negotiate ALPN h2"
   case e
   of 0: "TLS session closed"
   of 3, 4: "TLS: unsupported protocol version (TLS 1.2 is required)"

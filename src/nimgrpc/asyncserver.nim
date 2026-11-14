@@ -10,7 +10,9 @@
 ##   bidirectional streaming).
 ##
 ## A handler ends the call by completing (status OK) or by failing with
-## GrpcError (any other status); any other error becomes UNKNOWN.
+## GrpcError (any other status); any other error becomes UNKNOWN with the fixed
+## message "internal error" (the exception text is not sent to the client;
+## `setErrorHook` gives it to the operator).
 ##
 ## When the call is over for the client (it cancelled, its deadline passed,
 ## the connection closed, the server stopped) the handler's future is
@@ -53,6 +55,9 @@ type
     {.gcsafe, raises: [].}
   AsyncStreamingHandler* = proc (ctx: AsyncServerContext; call: AsyncServerCall): Future[void]
     {.gcsafe, raises: [].}
+  ErrorHook* = proc (path: string; e: ref CatchableError) {.gcsafe, raises: [].}
+    ## Called with the method path and the exception of a handler that failed
+    ## with anything but a GrpcError.
 
   MethodKind = enum mkUnary, mkStreaming
   Method = object
@@ -69,6 +74,7 @@ type
     ka: Keepalive
     policy: PingPolicy
     limits: Limits
+    errorHook: ErrorHook
     h2: AsyncH2Server
 
 # ---------------------------------------------------------------- AsyncServerCall
@@ -219,13 +225,15 @@ proc runMethod(m: Method; ctx: AsyncServerContext; call: AsyncServerCall) {.asyn
 proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raises: []).} =
   let ctx = AsyncServerContext(timeoutMs: -1)
   var meth, contentType, encoding = ""
-  var acceptsGzip = false
+  var acceptsGzip, badTimeout = false
   for (k, v) in st.headers:
     case k
     of ":path": ctx.path = v
     of ":method": meth = v
     of "content-type": contentType = v
-    of "grpc-timeout": ctx.timeoutMs = parseTimeout(v)
+    of "grpc-timeout":
+      ctx.timeoutMs = parseTimeout(v)
+      badTimeout = ctx.timeoutMs < 0     # present but malformed: the call ends INTERNAL below
     of "grpc-encoding": encoding = v
     of "grpc-accept-encoding":
       for e in v.split(','):
@@ -235,7 +243,7 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
     if meth != "POST":
       st.sendHeaders(@[(":status", "405")], endStream = true)
       return
-    if not contentType.startsWith(grpcContentType):
+    if not contentType.isGrpcContentType:
       st.sendHeaders(@[(":status", "415")], endStream = true)
       return
   except H2Error:
@@ -252,6 +260,9 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
     call.finishCall(scUnimplemented, "grpc-encoding " & encoding.escape &
                     " is not supported", @[])
     return
+  if badTimeout:
+    call.finishCall(scInternal, "malformed grpc-timeout", @[])
+    return
   if ctx.path notin s.methods:
     call.finishCall(scUnimplemented, "unknown method " & ctx.path, @[])
     return
@@ -264,7 +275,8 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
   except GrpcError as e:
     call.finishCall(e.code, e.msg, ctx.trailers & e.trailers)
   except CatchableError as e:
-    call.finishCall(scUnknown, e.msg, ctx.trailers)
+    if s.errorHook != nil: s.errorHook(ctx.path, e)
+    call.finishCall(scUnknown, "internal error", ctx.trailers)
 
 # ---------------------------------------------------------------- server
 
@@ -289,6 +301,13 @@ proc addUnary*(s: AsyncGrpcServer; path: string; handler: AsyncUnaryHandler) =
 proc addStreaming*(s: AsyncGrpcServer; path: string; handler: AsyncStreamingHandler) =
   doAssert s.h2 == nil, "methods must be registered before start"
   s.methods[path] = Method(kind: mkStreaming, streaming: handler)
+
+proc setErrorHook*(s: AsyncGrpcServer; hook: ErrorHook) =
+  ## `hook` sees every handler exception that is not a GrpcError (those are the
+  ## handler's own answer); the client only gets UNKNOWN "internal error".
+  ## Without a hook nothing is logged. Set it before `start`.
+  doAssert s.h2 == nil, "the error hook must be set before start"
+  s.errorHook = hook
 
 proc start*(s: AsyncGrpcServer) =
   ## Starts listening; calls are served while the event loop runs.

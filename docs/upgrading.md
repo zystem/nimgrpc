@@ -6,6 +6,11 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 ## Unreleased
 
+- **ALPN is required**: a TLS client that offers no ALPN protocol is refused by the server in the handshake, and a client refuses a server that selects none. Clients of this library always offer `h2`; a tool or proxy that talks TLS to a server of this library must offer ALPN `h2` (`openssl s_client -alpn h2`).
+- **Content-type**: only `application/grpc`, `application/grpc+...` and `application/grpc;...` are gRPC. A look-alike such as `application/grpcx` gets HTTP 415 from a server, and a client call that receives one fails with UNKNOWN.
+- **Malformed `grpc-timeout`**: a call whose `grpc-timeout` is present but malformed now ends with INTERNAL ("malformed grpc-timeout"); before, it ran without a deadline. A client of this library never sends one.
+- **UNKNOWN says `internal error`**: when a handler raises something that is not a `GrpcError`, the client gets UNKNOWN with the message `internal error`, not the text of the exception. A program that read that text on the client side must raise a `GrpcError` with the message it wants to send. To see the real exception on the server, call `srv.setErrorHook(hook)` before `start` (blocking: `proc (path: string; e: ref CatchableError) {.nimcall, gcsafe, raises: [].}`, called on the worker thread; chronos: a closure of the same shape); without a hook nothing is logged.
+
 ## 0.4.0
 
 - **Handshake limit**: `Limits.handshakeTimeoutMs` is 20 s by default (was 120 s). A client that needs longer than that to finish TLS and send its first SETTINGS is cut off: raise the limit for such clients.

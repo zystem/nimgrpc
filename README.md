@@ -74,6 +74,12 @@ let ch = dial("127.0.0.1", 50051)
 let r = ch.unaryCall("/helloworld.Greeter/SayHello", @[1'u8, 2, 3], timeoutMs = 1000)
 ```
 
+A handler that raises a `GrpcError` sends that code and message. Any other
+exception reaches the client as UNKNOWN with the fixed message `internal
+error`, so paths or queries in its text do not leak; to log the real one,
+call `srv.setErrorHook(hook)` before `start` (the hook gets the method path and
+the exception; without a hook nothing is printed).
+
 TLS and mutual TLS (BearSSL, TLS 1.2, ALPN `h2`; RSA or EC keys in PEM):
 
 ```nim
