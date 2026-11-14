@@ -39,10 +39,16 @@ type
     closed: bool               ## the stream is closed
     errorCode: uint32          ## RST_STREAM / GOAWAY code, 0 on a clean close
     handled: bool              ## server: a handler owns the stream
+    holdMax: int               ## server: > 0 while the stream waits for its whole body before
+                               ## it gets a worker; the most body bytes it may wait with
+    credited: int              ## bytes of `inbuf` whose stream window has been given back already
 
   ConnObj = object
     sock: Socket
     sess: H2Session
+    peer: string          ## server: the address of the client, for `Limits.maxConnectionsPerIp`
+    unread: int           ## body bytes in the `inbuf` of all streams
+    connOwed: int         ## received bytes not yet given back to the connection window
     lock: Lock
     cond: Cond            ## every waiter on this connection, and the writer
     outQ: Deque[seq[byte]]
@@ -97,6 +103,13 @@ type
     ## If it returns without ending the response, the stream is reset with
     ## INTERNAL_ERROR.
 
+  WholeRequest* = proc (headers: openArray[Header]; userData: pointer): int
+    {.nimcall, gcsafe, raises: [].}
+    ## Says, from the request HEADERS, whether the handler of this stream needs the whole body
+    ## before it can do anything (a unary call): the number of body bytes that may wait without
+    ## a worker, or 0 to start the handler at once. A stream that waits costs no thread, so a
+    ## client that opens calls and sends nothing does not use the workers up.
+
   Job = object
     conn: ptr ConnObj
     id: int32
@@ -109,6 +122,7 @@ type
     listener: Socket
     handler: StreamHandler
     userData: pointer
+    whole: WholeRequest   ## nil: every handler starts when the HEADERS arrive
     conns: seq[Conn]      ## owned by the accept thread until it is joined
     stopping: Atomic[bool]
     acceptor: Thread[ptr ServerObj]
@@ -295,22 +309,88 @@ proc streamPtr(c: ptr ConnObj; id: int32): ptr StreamState =
     return v
   nil
 
+const maxConnUnread = 8 * receiveWindow
+  ## Body bytes received on all the streams of a connection and not yet taken, up to which the
+  ## connection window is given back at once. Above it the peer has to wait for readers.
+
+proc creditConnLocked(c: ptr ConnObj) =
+  ## Gives back as much of the connection window as the bytes still unread allow.
+  if c.connOwed > 0 and c.unread < maxConnUnread and not c.closed:
+    let n = min(c.connOwed, maxConnUnread - c.unread)
+    c.connOwed -= n
+    try: c.sess.consumeConnection(n)
+    except CatchableError: discard
+
+proc receivedLocked(c: ptr ConnObj; n: int; kept: bool) =
+  ## `n` body bytes have arrived. Flow control is manual. The window of a stream reopens only
+  ## as its reader takes the bytes, so a stream nobody reads holds one window of them and no
+  ## more. The window of the connection reopens at once, so that such a stream does not stop
+  ## the others, until `maxConnUnread` bytes wait in all the streams together.
+  if kept: c.unread += n
+  c.connOwed += n
+  c.creditConnLocked()
+
+proc takenLocked(c: ptr ConnObj; id: int32; n: int; credited = 0) =
+  ## `n` bytes of stream `id` have been taken by its reader, or thrown away with the stream;
+  ## the stream window of `credited` of them was given back when they arrived.
+  if n <= 0: return
+  c.unread -= n
+  if not c.closed and n > credited:
+    try: c.sess.consumeStream(id, n - credited)
+    except CatchableError: discard
+  c.creditConnLocked()
+  try: c.queueOutputLocked()
+  except CatchableError as e: c.failLocked(e.msg)
+
+proc dropStreamLocked(c: ptr ConnObj; id: int32) =
+  ## Forgets the stream; bytes received and never taken are given back.
+  let st = c.streamPtr(id)
+  if st != nil:
+    let unread = st.inbuf.len
+    let credited = st.credited
+    c.streams.del(id)
+    c.takenLocked(id, unread, credited)
+
 proc workerLoop(s: ptr ServerObj) {.thread.}
 
 proc dispatchLocked(c: ptr ConnObj; id: int32; headers: seq[Header]) =
   let s = c.server
   c.streamPtr(id).handled = true
-  c.lastDispatched = id
+  c.streamPtr(id).holdMax = 0
   c.activityNs = nowNs()
   inc c.pending
   acquire(s.jobLock)
   s.jobs.addLast Job(conn: c, id: id, headers: headers)
   if s.jobs.len > s.idle and s.workers.len < s.maxWorkers:
     let w = WorkerThread()
-    s.workers.add w
-    createThread(w.th, workerLoop, s)
+    try:
+      createThread(w.th, workerLoop, s)
+      s.workers.add w
+    except ResourceExhaustedError:
+      discard       # the system has no thread to give: the job waits for a worker that exists
   signal(s.jobCond)
   release(s.jobLock)
+
+proc heldLocked(c: ptr ConnObj; id: int32; n: int) =
+  ## Stream `id` waits for its whole body (see `WholeRequest`) and `n` more bytes of it have
+  ## arrived, or its end. It gets its worker when the body has ended or is larger than agreed.
+  let st = c.streamPtr(id)
+  if st.inEnded or st.inbuf.len > st.holdMax:
+    c.dispatchLocked(id, st.blocks[0])
+  elif n > 0 and not c.closed:
+    # nobody reads yet: keep the window of the stream open for the rest of the message
+    try:
+      c.sess.consumeStream(id, n)
+      st.credited += n
+    except CatchableError: discard
+
+proc releaseHeldLocked(c: ptr ConnObj) =
+  ## The connection window is being held back (`maxConnUnread`): the streams that wait for
+  ## their bodies could then wait for ever, so they get their workers now.
+  var ids: seq[int32]
+  for id, st in c.streams.pairs:
+    if st.holdMax > 0 and not st.handled and not st.closed: ids.add id
+  for id in ids: c.dispatchLocked(id, c.streamPtr(id).blocks[0])
 
 proc handleEventsLocked(c: ptr ConnObj) =
   let isServer = c.server != nil
@@ -323,22 +403,34 @@ proc handleEventsLocked(c: ptr ConnObj) =
         let st = c.streamPtr(ev.streamId)
         st.blocks.add ev.headers
         if ev.headersEndStream: st.inEnded = true
+        if st.holdMax > 0 and not st.handled: c.heldLocked(ev.streamId, 0)
       elif isServer and ev.streamId > c.lastDispatched:
+        let s = c.server
+        var hold = 0
+        if s.whole != nil and not ev.headersEndStream:
+          hold = max(0, s.whole(ev.headers, s.userData))
         c.streams[ev.streamId] = StreamState(blocks: @[ev.headers],
-                                             inEnded: ev.headersEndStream)
-        c.dispatchLocked(ev.streamId, ev.headers)
+                                             inEnded: ev.headersEndStream, holdMax: hold)
+        c.lastDispatched = ev.streamId
+        if hold == 0: c.dispatchLocked(ev.streamId, ev.headers)
     of evData:
       if known:
         let st = c.streamPtr(ev.streamId)
+        let n = ev.data.len
         if st.inbuf.len == 0: st.inbuf = move ev.data     # no copy
         else: st.inbuf.appendBytes ev.data
         if ev.dataEndStream: st.inEnded = true
+        c.receivedLocked(n, kept = true)
+        if st.holdMax > 0 and not st.handled: c.heldLocked(ev.streamId, n)
+        if c.connOwed > 0: c.releaseHeldLocked()
+      else:
+        c.receivedLocked(ev.data.len, kept = false)       # nobody will read it
     of evStreamClosed:
       if known:
         let st = c.streamPtr(ev.streamId)
         st.closed = true
         st.errorCode = ev.errorCode
-        if isServer and not st.handled: c.streams.del(ev.streamId)
+        if isServer and not st.handled: c.dropStreamLocked(ev.streamId)
     of evGoAway:
       c.goawayReceived = true
     of evPingAck:
@@ -635,8 +727,11 @@ proc ioSubmit(c: ptr ConnObj; reader: bool) =
     # Threads live for the rest of the process; the Thread object must not
     # move, so it lives in shared memory.
     let th = createShared(Thread[ptr IoPool])
-    createThread(th[], ioThread, p)
-    inc p.threads
+    try:
+      createThread(th[], ioThread, p)
+      inc p.threads
+    except ResourceExhaustedError:
+      deallocShared(th)   # no thread to be had: the job waits for one that becomes free
   signal(p.cond)
   release(p.lock)
 
@@ -731,6 +826,9 @@ proc recvLocked(c: ptr ConnObj; id: int32; buf: var seq[byte];
     if st.inbuf.len > 0:
       buf = move st.inbuf
       st.inbuf = @[]
+      let credited = st.credited
+      st.credited = 0
+      c.takenLocked(id, buf.len, credited)   # the peer may send that much more
       return true
     if st.inEnded: return false
     if st.closed: raise c.closedError(st, id)
@@ -864,7 +962,7 @@ proc finishHandlerLocked(c: ptr ConnObj; id: int32) =
         c.sess.resetStream(id, INTERNAL_ERROR)
         c.queueOutputLocked()
       except CatchableError: discard
-    c.streams.del(id)      # a late close event finds nothing and is ignored
+    c.dropStreamLocked(id) # a late close event finds nothing and is ignored
   dec c.pending
   c.wakeAll()
 
@@ -1041,12 +1139,14 @@ proc newStreamServer*(handler: StreamHandler; userData: pointer = nil;
                       port = Port(0); address = "127.0.0.1";
                       maxWorkers = 256; tls: TlsConfig = nil;
                       keepalive = Keepalive(); pingPolicy = PingPolicy();
-                      limits = Limits()): Server =
+                      limits = Limits(); wholeRequest: WholeRequest = nil): Server =
   ## Every request stream gets a worker thread for as long as its handler
   ## runs; the pool grows on demand up to `maxWorkers` threads. With `tls`
   ## connections must speak TLS 1.2 with ALPN h2. `limits` caps streams,
-  ## connections and queued bytes (see `Limits`).
+  ## connections and queued bytes (see `Limits`). With `wholeRequest` a stream whose handler
+  ## needs the whole body first gets its worker only when the body is there (see `WholeRequest`).
   result = Server(handler: handler, userData: userData, maxWorkers: maxWorkers,
+                  whole: wholeRequest,
                   tls: tls, ka: keepalive, policy: pingPolicy, limits: limits)
   initLock(result.jobLock)
   initCond(result.jobCond)
@@ -1108,9 +1208,20 @@ proc acceptLoop(s: ptr ServerObj) {.thread.} =
       if s.limits.maxConnections > 0 and s.conns.len >= s.limits.maxConnections:
         client.close()                 # over the limit: the peer sees a closed connection
         continue
+      var peer = ""
+      if s.limits.maxConnectionsPerIp > 0:
+        try: peer = client.getPeerAddr()[0]
+        except CatchableError: discard
+        var same = 0
+        for other in s.conns:
+          if other.peer == peer: inc same
+        if same >= s.limits.maxConnectionsPerIp:
+          client.close()               # this address has its share already
+          continue
       let c = newConn(client, newServerSession(
-        maxConcurrentStreams = s.limits.maxConcurrentStreams), s)
+        manualFlow = true, maxConcurrentStreams = s.limits.maxConcurrentStreams), s)
       c.maxBuffer = s.limits.maxConnectionBuffer
+      c.peer = peer
       c.handshakeNs = s.limits.handshakeTimeoutMs.int64 * 1_000_000
       c.maxIdleNs = s.limits.maxConnectionIdleMs.int64 * 1_000_000
       c.graceNs = s.limits.maxConnectionAgeGraceMs.int64 * 1_000_000
@@ -1219,7 +1330,7 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   ## covered: it blocks for as long as the resolver takes.
   let sock = connectAny(host, port, connectTimeoutMs)
   setTcpKeepalive(sock.getFd, keepalive.tcpSecs)
-  result = newConn(sock, newClientSession(), nil)
+  result = newConn(sock, newClientSession(manualFlow = true), nil)
   result.ka = keepalive
   if tls != nil:
     result.tlsConf = tls
@@ -1350,7 +1461,7 @@ proc release*(st: var ClientStream) =
         c.sess.resetStream(st.id, CANCEL)
         c.queueOutputLocked()
       except CatchableError: discard
-    c.streams.del(st.id)
+    c.dropStreamLocked(st.id)
   release(c.lock)
 
 proc request*(c: Conn; headers: openArray[Header]; body: openArray[byte] = [];

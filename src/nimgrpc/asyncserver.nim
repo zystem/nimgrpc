@@ -240,7 +240,10 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
       return
   except H2Error:
     return
-  st.setTimeout(ctx.timeoutMs)
+  if s.limits.maxCallMs > 0 and (ctx.timeoutMs < 0 or ctx.timeoutMs > s.limits.maxCallMs):
+    st.setTimeout(s.limits.maxCallMs)  # the server's own limit; `ctx.timeoutMs` stays the client's
+  else:
+    st.setTimeout(ctx.timeoutMs)
   ctx.stream = st
   ctx.metadata = fromWire(st.headers)
   let call = AsyncServerCall(st: st, ctx: ctx, maxMessage: s.maxMessage,

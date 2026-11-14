@@ -100,8 +100,10 @@ earn GOAWAY ENHANCE_YOUR_CALM "too_many_pings"). `srv.stop(graceMs = 5000)`
 sends GOAWAY and lets running calls finish before closing. Servers also take
 `limits = Limits(maxConcurrentStreams: 100, maxConnections: 5000)`: streams per
 connection (100 by default), connections (unlimited by default) and the bytes
-queued per connection (16 MiB). Set `maxConnections` on a server that faces
-untrusted clients.
+queued per connection (16 MiB). On a server that faces untrusted clients set
+`maxConnections`, `maxConnectionsPerIp` (where clients connect directly) and
+`maxCallMs` (the longest a call may last); see the "slow or stalled peer" row of
+[docs/threat-model.md](docs/threat-model.md) for what each one bounds.
 
 Health checking: `import nimgrpc/health`, then `let health = newHealth(); srv.register(health)`
 adds the standard `grpc.health.v1.Health` service (`Check`, `Watch`, `List`) to a blocking or a

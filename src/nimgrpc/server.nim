@@ -68,6 +68,7 @@ type
   Registry = object
     methods: Table[string, Method]
     maxMessage: int
+    maxCallMs: int           ## `Limits.maxCallMs`
 
   GrpcServer* = ref object
     reg: Registry
@@ -234,7 +235,10 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
       return
   except H2Error:
     return
-  st.setTimeout(ctx.timeoutMs)
+  if reg.maxCallMs > 0 and (ctx.timeoutMs < 0 or ctx.timeoutMs > reg.maxCallMs):
+    st.setTimeout(reg.maxCallMs)       # the server's own limit; `ctx.timeoutMs` stays the client's
+  else:
+    st.setTimeout(ctx.timeoutMs)
   ctx.stream = st.addr
   ctx.metadata = fromWire(st.headers)
   var call = ServerCall(st: st.addr, ctx: ctx.addr, maxMessage: reg.maxMessage,
@@ -267,6 +271,18 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
   except CatchableError as e:
     call.finishCall(scUnknown, e.msg, ctx.trailers)
 
+proc wholeRequest(headers: openArray[Header]; userData: pointer): int
+    {.nimcall, gcsafe, raises: [].} =
+  ## A unary call can do nothing before its one message is there, so it waits for it without a
+  ## worker: a client that opens calls and never sends the message uses no thread.
+  let reg = cast[ptr Registry](userData)
+  for (k, v) in headers:
+    if k == ":path":
+      let m = reg.methods.getOrDefault(v)
+      if m.kind == mkUnary and m.unary != nil: return reg.maxMessage + 5
+      return 0
+  0
+
 # ---------------------------------------------------------------- server
 
 proc newGrpcServer*(port = 0; address = "127.0.0.1"; maxWorkers = 256;
@@ -275,7 +291,10 @@ proc newGrpcServer*(port = 0; address = "127.0.0.1"; maxWorkers = 256;
                     limits = Limits()): GrpcServer =
   ## `address` is the interface to listen on: "127.0.0.1" (the default), "0.0.0.0", "::1" for
   ## IPv6 loopback, or "::" for IPv6 and IPv4 together.
-  ## At most `maxWorkers` calls run at once; more wait for a free worker.
+  ## At most `maxWorkers` calls run at once; more wait for a free worker. A unary call takes
+  ## its worker only once its request message has arrived, so calls that are opened and left
+  ## without a message use no worker; a streaming call takes one from its start, for as long
+  ## as its handler runs (`Limits.maxCallMs` bounds that).
   ## `limits` caps the streams of a connection, the connections and the bytes
   ## queued per connection (see `Limits`; 100 streams by default).
   ## With `tls` (see `tlsServerConfig`) clients must use TLS 1.2 with ALPN h2.
@@ -283,8 +302,9 @@ proc newGrpcServer*(port = 0; address = "127.0.0.1"; maxWorkers = 256;
   ## may ping (gRPC's enforcement policy; off by default).
   result = GrpcServer()
   result.reg.maxMessage = maxMessage
+  result.reg.maxCallMs = limits.maxCallMs
   result.h2 = newStreamServer(handle, result.reg.addr, Port(port), address,
-                              maxWorkers, tls, keepalive, pingPolicy, limits)
+                              maxWorkers, tls, keepalive, pingPolicy, limits, wholeRequest)
 
 proc addUnaryRaw*(s: GrpcServer; path: string; handler: RawUnaryHandler;
                   userData: pointer) =
