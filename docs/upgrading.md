@@ -6,7 +6,12 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 ## Unreleased
 
+## 0.3.1
+
 - **Nesting limit**: a message nested deeper than 100 levels (`maxNestingDepth` in `nimgrpc/protobuf`), counting sub-messages and groups, is now rejected with `ProtobufError`; a server answers INTERNAL. Real messages are far shallower (protobuf-go and C++ protobuf use the same limit). Hand-written code that builds a `PbReader` for a nested message from copied bytes should use `childReader` (or `subReader`) so that the depth carries over. The generator did not change, so generated code does not have to be regenerated for this (regenerate as usual with each release).
+- **Upgrade from 0.3.0 at once if a server registers `nimgrpc/health`**: a request of a few bytes stops it (see the changelog). Nothing to change in your code.
+- **`TlsConfig` and threads**: a program that hands one `TlsConfig` to several threads should give each thread (or each connection) `share(config)` instead of the object itself.
+- **TLS by IP address**: `dial("10.0.0.5", ..., tls)` now verifies the certificate against its IP entries; a `serverName` that was set only to work around this may be dropped.
 
 ## 0.3.0
 
