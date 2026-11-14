@@ -138,6 +138,7 @@ typedef struct {
     int require_client_cert;
     int cipher_order;              /* 0: by the CPU, 1: AES-GCM first, 2: ChaCha20 first */
     int lifetime;                  /* seconds a session may be resumed; 0: never */
+    int refs;                      /* owners: the TlsConfig handles and the connections made from it (atomic) */
     pthread_mutex_t mu;            /* guards `cache` (creation) and the saved client session */
     struct gtls_cache *cache;      /* server: sessions that may be resumed */
     int have_session;              /* client: the last verified session ... */
@@ -160,6 +161,7 @@ gtls_conf *gtls_conf_new(void) {
     gtls_conf *c = calloc(1, sizeof(gtls_conf));
     if (c) {
         c->lifetime = DEFAULT_LIFETIME;
+        c->refs = 1;
         pthread_mutex_init(&c->mu, NULL);
     }
     return c;
@@ -283,8 +285,7 @@ void gtls_conf_require_client_cert(gtls_conf *c, int on) { c->require_client_cer
 
 static void cache_free(struct gtls_cache *k);
 
-void gtls_conf_free(gtls_conf *c) {
-    if (!c) return;
+static void conf_destroy(gtls_conf *c) {
     for (size_t i = 0; i < c->ta_num; i++) {
         br_x509_trust_anchor *ta = &c->tas[i];
         free(ta->dn.data);
@@ -310,6 +311,17 @@ void gtls_conf_free(gtls_conf *c) {
         free(c->key_mem);
     }
     free(c);
+}
+
+/* An owner more: a handle made by `share`, or a connection. The count is atomic, so owners in different threads need no lock of ours. */
+void gtls_conf_retain(gtls_conf *c) {
+    if (c) __atomic_fetch_add(&c->refs, 1, __ATOMIC_RELAXED);
+}
+
+/* An owner less; the last one frees the configuration (and so the trust anchors, the identity and the sessions that connections made from it still use are never freed under them). */
+void gtls_conf_free(gtls_conf *c) {
+    if (!c) return;
+    if (__atomic_fetch_sub(&c->refs, 1, __ATOMIC_ACQ_REL) == 1) conf_destroy(c);
 }
 
 /* ------------------------------------------------------------------ conn */
@@ -724,6 +736,7 @@ gtls_conn *gtls_client_new(gtls_conf *c, const char *server_name) {
         free(t);
         return NULL;
     }
+    gtls_conf_retain(c);          /* the connection keeps the configuration alive; gtls_free lets go */
     return t;
 }
 
@@ -755,14 +768,17 @@ gtls_conn *gtls_server_new(gtls_conf *c) {
         free(t);
         return NULL;
     }
+    gtls_conf_retain(c);
     return t;
 }
 
 void gtls_free(gtls_conn *t) {
     if (t) {
+        gtls_conf *c = t->conf;
         free(t->watch.leaf);
         memset(t, 0, sizeof *t);
         free(t);
+        gtls_conf_free(c);
     }
 }
 

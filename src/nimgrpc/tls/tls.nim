@@ -1,8 +1,13 @@
 ## TLS 1.2 with ALPN "h2" on BearSSL, I/O-free (see gtls.c).
 ##
 ## A `TlsConfig` is built once and shared read-only by every connection that
-## uses it; it must outlive them. A `TlsConn` is one session, driven by the
-## connection that owns it under that connection's lock.
+## uses it. The configuration itself (trust anchors, identity, resumable
+## sessions) is counted with atomic operations and a connection holds a count
+## of its own, so it outlives them. The `TlsConfig` object that points at it is
+## a Nim `ref`, and a Nim `ref` must not be copied between threads (ORC counts
+## references without atomics): a thread that wants the configuration takes
+## `share` of it and uses that object alone. A `TlsConn` is one session, driven
+## by the connection that owns it under that connection's lock.
 
 import std/os
 import bearssl/abi/[bearssl_ssl, bearssl_x509, bearssl_pem, bearssl_ec,
@@ -26,6 +31,7 @@ proc gtls_conf_set_identity(c: GtlsConfP; chain: ptr byte; chainLen: csize_t;
 proc gtls_conf_require_client_cert(c: GtlsConfP; on: cint)
 proc gtls_conf_set_cipher_order(c: GtlsConfP; order: cint)
 proc gtls_conf_set_lifetime(c: GtlsConfP; seconds: cint)
+proc gtls_conf_retain(c: GtlsConfP)
 proc gtls_conf_free(c: GtlsConfP)
 proc gtls_client_new(c: GtlsConfP; serverName: cstring): GtlsConnP
 proc gtls_server_new(c: GtlsConfP): GtlsConnP
@@ -104,6 +110,17 @@ proc setCipherOrder*(c: TlsConfig; order: CipherOrder) =
   ## picks AES-GCM where the CPU does it in hardware, which is faster, and
   ## ChaCha20-Poly1305 elsewhere, where BearSSL's portable AES is slow.
   gtls_conf_set_cipher_order(c.raw, cint(ord(order)))
+
+proc share*(c: TlsConfig): TlsConfig =
+  ## Another object for the same configuration, with the same resumable
+  ## sessions: for a thread (or a connection) that must not touch the reference
+  ## count of `c`, which another thread may be changing. The configuration is
+  ## freed when the last object made from it and the last connection using it
+  ## are gone. `c` is only read, so any number of threads may call `share` on it
+  ## at once as long as none of them copies the reference.
+  if c.isNil: return nil
+  gtls_conf_retain(c.raw)
+  TlsConfig(raw: c.raw)
 
 const defaultSessionLifetime* = 600
 

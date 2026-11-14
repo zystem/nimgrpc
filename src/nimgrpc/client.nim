@@ -19,7 +19,7 @@ import std/[strutils, locks, atomics, os, monotimes, times]
 import ./status, ./wire, ./h2/blocking, ./h2/common, ./compress/gzip, ./cleanup
 export status, blocking.TlsConfig, blocking.tlsClientConfig, blocking.tlsServerConfig,
        blocking.TlsError, blocking.Keepalive, blocking.CipherOrder,
-       blocking.setCipherOrder, blocking.setSessionLifetime, blocking.defaultSessionLifetime
+       blocking.setCipherOrder, blocking.setSessionLifetime, blocking.defaultSessionLifetime, blocking.share
 
 const userAgent = "grpc-nim/0.0.1"
 
