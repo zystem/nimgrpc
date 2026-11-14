@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+- `tools/hostile.sh` (`tools/hostile.py`, `tools/hostiletarget.nim`): a hostile client in raw HTTP/2 frames against the blocking and the chronos server: nested Protobuf groups, a wire type that does not exist, Rapid Reset, CONTINUATION, PING and SETTINGS floods, oversized headers, a 4 GB length prefix, a gzip bomb, random frames, 400 calls opened and left (unary, `Health/Watch`, streaming), 300 MB on a stream nobody reads, 500 idle connections. After each attack an ordinary call must be answered and the server must not have grown past its bound. These are the attacks of the pentest of 2026-11-14, kept so that what they found does not come back.
+- `tools/conformance.sh`: h2spec against both HTTP/2 adapters (a failure that is not one of the known ones of [docs/h2spec.md](docs/h2spec.md) fails it) and grpcurl against server reflection.
+- The workflow `Hostile client` runs both once a week and when their files change; a failure of the weekly run opens an issue.
+
 ## 0.4.0 — 2026-11-15
 
 ### Security

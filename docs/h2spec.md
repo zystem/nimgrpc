@@ -37,3 +37,7 @@ artefact:
 
 Still to do: rerun with a server that delays its replies, so the timing
 artefact in 5.1.1 drops out.
+
+## In CI
+
+`tools/conformance.sh` runs h2spec against both adapters in the workflow `Hostile client` (weekly, and when its files change) and fails on a failure that is not one of those above (`tools/h2spec_check.py`). It also asks both servers for their services with grpcurl, a client of server reflection that this project did not write.
