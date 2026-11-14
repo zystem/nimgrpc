@@ -4,6 +4,12 @@
 ## generated `encode` / `decode`. Unknown fields are skipped on decode.
 
 
+const
+  maxNestingDepth* = 100
+    ## How deep messages and groups may nest on decode (the limit protobuf-go and
+    ## C++ protobuf use). The top-level message is at depth 0. Past it decoding
+    ## raises ProtobufError.
+
 type
   ProtobufError* = object of CatchableError
     ## Malformed input.
@@ -15,6 +21,7 @@ type
     data*: ptr UncheckedArray[byte]
     len*: int
     pos*: int
+    depth*: int  ## nesting depth of this reader; `subReader` adds one
 
   PbWriter* = object
     buf*: seq[byte]
@@ -130,9 +137,19 @@ proc getString*(r: var PbReader): string =
 
 proc subReader*(r: var PbReader): PbReader =
   ## A reader over the next length-delimited value; `r` moves past it.
+  ## Raises ProtobufError when the nesting is deeper than `maxNestingDepth`.
+  if r.depth >= maxNestingDepth: pbError("message nested too deeply")
   let n = r.getLen()
-  result = PbReader(data: cast[ptr UncheckedArray[byte]](r.data[r.pos].addr), len: n)
+  result = PbReader(data: cast[ptr UncheckedArray[byte]](r.data[r.pos].addr), len: n,
+                    depth: r.depth + 1)
   r.pos += n
+
+proc childReader*(r: PbReader; data: openArray[byte]): PbReader =
+  ## A reader over `data`, a message nested in what `r` reads, for code that
+  ## copied the bytes out first. Checks the depth like `subReader`.
+  if r.depth >= maxNestingDepth: pbError("message nested too deeply")
+  result = initReader(data)
+  result.depth = r.depth + 1
 
 proc unzigzag32*(v: uint64): int32 {.inline.} =
   let u = uint32(v and 0xffff_ffff'u64)
@@ -142,19 +159,34 @@ proc unzigzag64*(v: uint64): int64 {.inline.} =
   cast[int64]((v shr 1) xor (0'u64 - (v and 1)))
 
 proc skipField*(r: var PbReader; wt: WireType; field: int) =
+  ## Skips one field. Groups (proto2) are skipped whole, nested ones included;
+  ## they count toward `maxNestingDepth` (no recursion, so a hostile message
+  ## cannot overflow the stack).
   case wt
   of wtVarint: discard r.getVarint()
   of wt64: discard r.getFixed64()
   of wt32: discard r.getFixed32()
   of wtLen: r.pos += r.getLen()
   of wtStartGroup:
-    # Groups (proto2) are skipped whole, nested ones included.
+    if r.depth >= maxNestingDepth: pbError("message nested too deeply")
+    var open: array[maxNestingDepth + 1, int]  # field numbers of the open groups
+    var n = 1
+    open[0] = field
     while true:
       var f: int
       var w: WireType
       r.getTag(f, w)
-      if w == wtEndGroup:
-        if f != field: pbError("mismatched end group")
-        return
-      r.skipField(w, f)
+      case w
+      of wtEndGroup:
+        if f != open[n - 1]: pbError("mismatched end group")
+        dec n
+        if n == 0: return
+      of wtStartGroup:
+        if r.depth + n >= maxNestingDepth: pbError("message nested too deeply")
+        open[n] = f
+        inc n
+      of wtVarint: discard r.getVarint()
+      of wt64: discard r.getFixed64()
+      of wt32: discard r.getFixed32()
+      of wtLen: r.pos += r.getLen()
   of wtEndGroup: pbError("unexpected end group")

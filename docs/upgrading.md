@@ -6,6 +6,8 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 ## Unreleased
 
+- **Nesting limit**: a message nested deeper than 100 levels (`maxNestingDepth` in `nimgrpc/protobuf`), counting sub-messages and groups, is now rejected with `ProtobufError`; a server answers INTERNAL. Real messages are far shallower (protobuf-go and C++ protobuf use the same limit). Hand-written code that builds a `PbReader` for a nested message from copied bytes should use `childReader` (or `subReader`) so that the depth carries over. The generator did not change, so generated code does not have to be regenerated for this (regenerate as usual with each release).
+
 ## 0.3.0
 
 - **Connection age and idleness** (new, off by default): `Limits.maxConnectionAgeMs`, `maxConnectionIdleMs` and `maxConnectionAgeGraceMs` drain old or idle connections with GOAWAY. Nothing changes unless you set them; a client that does not redial after GOAWAY would fail its next call, which the clients of this library do not.

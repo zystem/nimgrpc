@@ -87,7 +87,7 @@ proc indexMessage(r: var PbReader; scope: string; names: var seq[string]) =
       if fieldNo == 1: names.add full & "." & orr.readString()
       else: orr.skipField(wt, fieldNo)
   for n in nested:
-    var nr = initReader(n)
+    var nr = r.childReader(n)
     indexMessage(nr, full, names)
   for e in enums:
     var er = initReader(e)
@@ -133,7 +133,7 @@ proc indexFile(data: openArray[byte]): (FileInfo, seq[string]) =
     else: r.skipField(wt, fieldNo)
   if info.name.len == 0: raise newException(ProtobufError, "a FileDescriptorProto without a name")
   for m in messages:
-    var mr = initReader(m)
+    var mr = r.childReader(m)
     indexMessage(mr, pkg, names)
   for e in enums:
     var er = initReader(e)

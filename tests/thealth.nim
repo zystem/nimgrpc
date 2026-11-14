@@ -3,7 +3,7 @@
 import std/[unittest, options, monotimes, times, tables]
 import pkg/chronos
 import nimgrpc
-import nimgrpc/health
+import nimgrpc/[health, protobuf]
 import nimgrpc/[asyncclient, asyncserver]
 from nimgrpc/client as bc import nil
 
@@ -40,6 +40,29 @@ suite "the messages":
     check list.len == 2
     check list["a.B"] == hsNotServing
     check list[""] == hsServing
+
+  test "a wire type that does not exist is an error, not a crash":
+    for bad in [@[0x0e'u8, 0x00], @[0x0f'u8, 0x00], @[0x06'u8], @[0x00'u8, 0x00]]:
+      expect ProtobufError: discard decodeHealthRequest(bad)
+      expect ProtobufError: discard decodeHealthResponse(bad)
+      expect ProtobufError: discard decodeHealthList(bad)
+    # inside an entry of the list (field 1, 2 bytes long)
+    expect ProtobufError: discard decodeHealthList(@[0x0a'u8, 0x02, 0x0e, 0x00])
+
+  test "Check with such a request is INVALID_ARGUMENT and the server goes on":
+    let srv = newGrpcServer()
+    let h = newHealth()
+    srv.register(h)
+    srv.start()
+    let ch = bc.dial("127.0.0.1", srv.port)
+    var code = scOk
+    try: discard bc.unaryCall(ch, checkPath, @[0x0e'u8, 0x00], timeoutMs = 3000)
+    except GrpcError as e: code = e.code
+    check code == scInvalidArgument
+    check ch.checkOf("") == hsServing
+    ch.close()
+    srv.stop()
+    h.close()
 
 suite "the blocking server":
   test "Check: the server as a whole is SERVING, a service is what was set, a stranger is NOT_FOUND":

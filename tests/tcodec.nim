@@ -6,7 +6,7 @@
 ## must also decode, in protoc, to the same text as the original.
 
 import std/[unittest, os, osproc, options, tables, math, sequtils]
-import nimgrpc/[protobuf, bytebuf, wire, status]
+import nimgrpc/[protobuf, bytebuf, wire, status, health]
 import ./gen/[codec_pb, legacy_pb]
 
 const dir = currentSourcePath.parentDir / "proto"
@@ -31,6 +31,32 @@ proc protocDecode(typ, file: string; data: seq[byte]): string =
                                " " & file & " < " & tmp.quoteShell)
   doAssert code == 0, outp
   outp
+
+proc groupBomb(n: int; field = 1000): seq[byte] =
+  ## `n` start-groups, then `n` end-groups: unknown field `field`, nested.
+  var w: PbWriter
+  for i in 0 ..< n: w.putTag(field, wtStartGroup)
+  for i in 0 ..< n: w.putTag(field, wtEndGroup)
+  w.buf
+
+proc startGroups(n: int): seq[byte] =
+  ## Only the opening tags: 0xC3 0x3E, n times. What an attacker sends.
+  for i in 0 ..< n:
+    result.add 0xC3'u8
+    result.add 0x3E'u8
+
+proc nodeChain(n: int): seq[byte] =
+  ## A Node with a child with a child ... `n` levels below the top one.
+  var sz = newSeq[int](n + 1)   # sz[i]: size of the message at level i
+  for i in countdown(n - 1, 0):
+    var w: PbWriter
+    w.putVarint(sz[i + 1].uint64)
+    sz[i] = 1 + w.buf.len + sz[i + 1]
+  var w: PbWriter
+  for i in 0 ..< n:
+    w.putTag(2, wtLen)
+    w.putVarint(sz[i + 1].uint64)
+  w.buf
 
 suite "proto3 codec":
   let original = load("everything.bin")
@@ -127,6 +153,74 @@ suite "proto3 codec":
     w.putTag(1001, wt32); w.putFixed32(1)
     w.putTag(19, wtVarint); w.putVarint(5)
     check Everything.decode(w.buf).`type` == 5
+
+suite "nesting limit":
+  test "the limit is 100":
+    check maxNestingDepth == 100
+
+  test "groups nested exactly at the limit are skipped":
+    discard Node.decode(groupBomb(maxNestingDepth))
+    discard Node.decode(groupBomb(1))
+
+  test "groups one deeper raise ProtobufError":
+    expect ProtobufError:
+      discard Node.decode(groupBomb(maxNestingDepth + 1))
+
+  test "a huge group bomb raises ProtobufError, no crash":
+    # 2 000 000 start-groups: 4 MB, just under the default message limit
+    let bomb = startGroups(2_000_000)
+    check bomb.len == 4_000_000
+    expect ProtobufError:
+      discard Node.decode(bomb)
+    expect ProtobufError:
+      discard Everything.decode(bomb)
+
+  test "groups count from the depth of the message they are in":
+    # Node.child (depth 1) holding 100 nested groups is 101 deep; 99 is fine
+    proc wrap(inner: seq[byte]): seq[byte] =
+      var w: PbWriter
+      w.putTag(2, wtLen)
+      w.putBytes(inner)
+      w.buf
+    discard Node.decode(wrap(groupBomb(maxNestingDepth - 1)))
+    expect ProtobufError:
+      discard Node.decode(wrap(groupBomb(maxNestingDepth)))
+
+  test "a mismatched or stray end group is still an error":
+    var w: PbWriter
+    w.putTag(1000, wtStartGroup); w.putTag(1001, wtEndGroup)
+    expect ProtobufError:
+      discard Node.decode(w.buf)
+    var e: PbWriter
+    e.putTag(1000, wtEndGroup)
+    expect ProtobufError:
+      discard Node.decode(e.buf)
+
+  test "nested messages exactly at the limit decode":
+    var m = Node.decode(nodeChain(maxNestingDepth))
+    var depth = 0
+    var cur = m.addr
+    while cur.child != nil:
+      cur = cur.child[].addr
+      inc depth
+    check depth == maxNestingDepth
+
+  test "nested messages one deeper raise ProtobufError":
+    expect ProtobufError:
+      discard Node.decode(nodeChain(maxNestingDepth + 1))
+
+  test "a huge chain of nested messages raises ProtobufError, no crash":
+    let bomb = nodeChain(700_000)
+    check bomb.len < 4 * 1024 * 1024
+    expect ProtobufError:
+      discard Node.decode(bomb)
+
+  test "decodeHealthRequest raises ProtobufError on the group bomb":
+    expect ProtobufError:
+      discard decodeHealthRequest(startGroups(300_000))
+    expect ProtobufError:
+      discard decodeHealthRequest(groupBomb(maxNestingDepth + 1))
+    check decodeHealthRequest(groupBomb(maxNestingDepth)) == ""
 
 suite "proto2 codec":
   let original = load("legacy.bin")
