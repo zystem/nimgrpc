@@ -71,6 +71,20 @@ suite "unary interop, Nim client and Nim server":
       code = e.code
     check code == scInternal
 
+  test "a request of 100 000 nested groups is INTERNAL and the server goes on":
+    # 0xC3 0x3E is field 1000, start-group; it used to overflow the stack
+    var bomb: seq[byte]
+    for i in 0 ..< 100_000: bomb.add [0xC3'u8, 0x3E]
+    var code = scOk
+    try:
+      discard ch.unaryCall("/grpc.testing.TestService/UnaryCall", bomb)
+    except GrpcError as e:
+      code = e.code
+    check code == scInternal
+    check ch.unaryCall("/grpc.testing.TestService/EmptyCall", newSeq[byte]()).message.len == 0
+    let ok = ch.unaryCall("/grpc.testing.TestService/UnaryCall", SimpleRequest(responseSize: 3).encode)
+    check SimpleResponse.decode(ok.message).payload.body.len == 3
+
 proc abortingInput(ctx: var ServerContext;
                    input: var ServerReader[StreamingInputCallRequest]):
                    StreamingInputCallResponse {.nimcall, gcsafe, raises: [CatchableError].} =

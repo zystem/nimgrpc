@@ -127,6 +127,11 @@ proc h2ClientBytes(): seq[seq[byte]] =
   result.add first & second & c.takeOutput()
   result.add c.takeOutput()
 
+proc nestedGroups(n: int): seq[byte] =
+  ## n nested unknown groups (field 1000), closed: the shape of a stack-depth attack.
+  for i in 0 ..< n: result.add [0xC3'u8, 0x3E]
+  for i in 0 ..< n: result.add [0xC4'u8, 0x3E]
+
 proc seedsFor(target: string): seq[seq[byte]] =
   let every = bytesOf(readFile(protoDir / "everything.bin"))
   case target
@@ -134,7 +139,7 @@ proc seedsFor(target: string): seq[seq[byte]] =
     result = @[framed(every), framed(every, 1) & framed(@[]), framed(@[1'u8]) & framed(@[2'u8, 3])]
   of "gzip":
     result = @[gzipCompress(every), gzipCompress(newSeq[byte](5000)), gzipCompress(@[])]
-  of "everything": result = @[every, @[]]
+  of "everything": result = @[every, @[], nestedGroups(99), nestedGroups(101)]
   of "legacy": result = @[bytesOf(readFile(protoDir / "legacy.bin")), @[]]
   of "wkt": result = @[bytesOf(readFile(protoDir / "wkt.bin")), @[]]
   of "h2server": result = h2ClientBytes()

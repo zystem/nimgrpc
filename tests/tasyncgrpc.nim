@@ -5,6 +5,8 @@ import std/[unittest, strutils, typedthreads, atomics]
 import pkg/chronos
 import nimgrpc/[asyncclient, asyncserver]
 from nimgrpc/client as bc import nil
+import nimgrpc/decode
+import ./gen/codec_pb
 
 proc toBytes(s: string): seq[byte] = @(s.toOpenArrayByte(0, s.high))
 proc toStr(b: seq[byte]): string =
@@ -72,6 +74,10 @@ proc flood(ctx: AsyncServerContext; call: AsyncServerCall) {.async.} =
 proc rawEcho(ctx: AsyncServerContext; req: seq[byte]): Future[seq[byte]] {.async.} =
   return req
 
+proc nodeName(ctx: AsyncServerContext; req: seq[byte]): Future[seq[byte]] {.async.} =
+  ## What a typed unary handler does with its request: decode, and INTERNAL if that fails.
+  return decodeMsg[Node](req, scInternal).name.toBytes
+
 proc refuse(ctx: AsyncServerContext; call: AsyncServerCall) {.async.} =
   ## Ends the call at once, without reading the request.
   raise newGrpcError(scResourceExhausted, "no")
@@ -85,6 +91,7 @@ proc newTestServer(): AsyncGrpcServer =
   result.addUnary("/t.S/Raw", rawEcho)
   result.addStreaming("/t.S/Refuse", refuse)
   result.addUnary("/t.S/Echo", echoUnary)
+  result.addUnary("/t.S/NodeName", nodeName)
   result.addStreaming("/t.S/Counter", counter)
   result.addStreaming("/t.S/Flood", flood)
   result.start()
@@ -126,6 +133,20 @@ suite "async gRPC":
         discard await ch.unaryCall("/t.S/Echo", "boom".toBytes)
       expectStatus(scUnimplemented):
         discard await ch.unaryCall("/t.S/Nope", "x".toBytes)
+      await ch.close()
+    run go(srv)
+
+  test "a request of 100 000 nested groups is INTERNAL and the server goes on":
+    proc go(srv: AsyncGrpcServer) {.async.} =
+      let ch = await dialAsync("127.0.0.1", srv.port)
+      var bomb: seq[byte]
+      for i in 0 ..< 100_000: bomb.add [0xC3'u8, 0x3E]   # field 1000, start-group
+      expectStatus(scInternal):
+        discard await ch.unaryCall("/t.S/NodeName", bomb)
+      let r = await ch.unaryCall("/t.S/NodeName", Node(name: "ok").encode)
+      ck r.message.toStr == "ok"
+      let e = await ch.unaryCall("/t.S/Echo", "hi".toBytes)
+      ck e.message.toStr == "HI"
       await ch.close()
     run go(srv)
 

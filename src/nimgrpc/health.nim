@@ -105,9 +105,9 @@ proc encodeHealthRequest*(service: string): seq[byte] =
 proc decodeHealthRequest*(data: openArray[byte]): string =
   var r = initReader(data)
   while r.pos < r.len:
-    let tag = r.getVarint()
-    let field = int(tag shr 3)
-    let wt = WireType(int(tag and 7))
+    var field: int
+    var wt: WireType
+    r.getTag(field, wt)            # raises ProtobufError for a wire type that does not exist
     if field == 1 and wt == wtLen: result = r.getString()
     else: r.skipField(wt, field)
 
@@ -122,9 +122,9 @@ proc encodeHealthResponse*(status: HealthStatus): seq[byte] =
 proc decodeHealthResponse*(data: openArray[byte]): HealthStatus =
   var r = initReader(data)
   while r.pos < r.len:
-    let tag = r.getVarint()
-    let field = int(tag shr 3)
-    let wt = WireType(int(tag and 7))
+    var field: int
+    var wt: WireType
+    r.getTag(field, wt)            # raises ProtobufError for a wire type that does not exist
     if field == 1 and wt == wtVarint:
       let v = int(r.getVarint())
       result = if v in 0 .. 3: HealthStatus(v) else: hsUnknown
@@ -147,18 +147,18 @@ proc encodeHealthList*(statuses: openArray[(string, HealthStatus)]): seq[byte] =
 proc decodeHealthList*(data: openArray[byte]): Table[string, HealthStatus] =
   var r = initReader(data)
   while r.pos < r.len:
-    let tag = r.getVarint()
-    let field = int(tag shr 3)
-    let wt = WireType(int(tag and 7))
+    var field: int
+    var wt: WireType
+    r.getTag(field, wt)            # raises ProtobufError for a wire type that does not exist
     if field == 1 and wt == wtLen:
       let entry = r.getBytes()
       var e = initReader(entry)
       var name = ""
       var st = hsUnknown
       while e.pos < e.len:
-        let t2 = e.getVarint()
-        let f2 = int(t2 shr 3)
-        let w2 = WireType(int(t2 and 7))
+        var f2: int
+        var w2: WireType
+        e.getTag(f2, w2)
         if f2 == 1 and w2 == wtLen: name = e.getString()
         elif f2 == 2 and w2 == wtLen: st = decodeHealthResponse(e.getBytes())
         else: e.skipField(w2, f2)

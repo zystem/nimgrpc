@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+- `nimgrpc/health`: a request (or, for the client, a response) with a protobuf wire type that does not exist (6 or 7) ended the program with a RangeDefect: the 7-byte body `00 00 00 00 02 0e 00` sent to `/grpc.health.v1.Health/Check` stopped any server that registered the health service, with no authentication. In 0.3.0 only (the service is new there). The decoders now raise `ProtobufError`, which the server answers with INVALID_ARGUMENT.
+- A small request could crash a server, or a client reading a reply: the Protobuf decoder had no limit on how deep messages nest. `skipField` skipped a group (an unknown proto2 start-group, two bytes `0xC3 0x3E` for field 1000) by recursing, so a body of such pairs made it recurse once per pair; 200 KB overflowed the stack of a blocking-server worker thread, and `decodeHealthRequest` on 600 KB overflowed the 8 MB main stack, which is where the chronos server runs handlers. Messages nested inside messages (a recursive type such as `message Node { Node child = 2; }`) recursed the same way: `Node.decode` of a 700 000-level chain of 3.5 MB crashed with a segmentation fault (run on the code of 0.3.0, a release build). Every program that decodes Protobuf it did not write is affected, all versions up to 0.3.0: the generated `decode`, the health service, reflection and the well-known types. The message limit (4 MiB by default) did not help, as 2 000 000 groups fit in it. Fixed: decoding stops with `ProtobufError` ("message nested too deeply") past `maxNestingDepth` (100, the limit of protobuf-go and C++ protobuf); a server answers INTERNAL, as for any message it cannot decode. Groups are now skipped without recursion. Generated code needs no regeneration: it reads a nested message through `subReader`, which now carries and checks the depth. Tests: `tests/tcodec.nim` (suite "nesting limit"), `tests/tgrpc.nim` and `tests/tasyncgrpc.nim` (a 200 KB group bomb to a server, then a normal call), and a seed in `tools/fuzz.nim`.
+
 ## 0.3.0 — 2026-11-09
 
 ### Security
