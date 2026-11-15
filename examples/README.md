@@ -84,6 +84,27 @@ None of the three prints anything: the generated file did not change. Now add a 
 method to `hello.proto`, run the second command again, and the compiler will tell you which
 handlers and calls to write.
 
+## 6. Code around every call
+
+[interceptors.nim](interceptors.nim) is the program of step 1 with two interceptors on the server and
+one on the client. A server interceptor runs around every call to a method. Here the first
+one logs the path and the status of each call, and the second refuses a call whose
+`authorization` metadata is not the token. The client interceptor adds the token. The program
+makes three calls: one that succeeds, one on a second channel that has no client interceptor
+(so it sends no token), and one where the handler fails. Each `log:` line is printed by the
+server, each `reply:` or `error:` line by the client. [docs/interceptors.md](../docs/interceptors.md)
+says what an interceptor can and cannot do.
+
+```console
+$ nim c -r examples/interceptors.nim
+log: /hello.Greeter/SayHello scOk
+reply: Hello, Nim
+log: /hello.Greeter/SayHello scUnauthenticated
+error: scUnauthenticated: missing or wrong token
+log: /hello.Greeter/SayHello scNotFound
+error: scNotFound: no such person
+```
+
 ## Next
 
 - What every call, option and limit is: [Using the library](../README.md#using-the-library) in
@@ -93,5 +114,5 @@ handlers and calls to write.
 - A server that faces clients you do not trust: the "slow or stalled peer" row of
   [docs/threat-model.md](../docs/threat-model.md).
 
-What was run: all five steps on 2026-11-15, on Linux Mint 22.3 (x86-64) with Nim 2.4.0, nghttp2 1.68.1 and protoc
-3.21.12, in a fresh clone.
+What was run: steps 1 to 5 on 2026-11-15, on Linux Mint 22.3 (x86-64) with Nim 2.4.0, nghttp2 1.68.1 and protoc
+3.21.12, in a fresh clone; step 6 on 2026-11-16 on Linux x86-64 with Nim 2.4.0 and nghttp2 1.68.0, in the working tree.

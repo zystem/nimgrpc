@@ -67,6 +67,33 @@ type
     of mkUnary: unary: RawUnaryHandler
     of mkStreaming: streaming: RawStreamingHandler
 
+  ServerNext* = object
+    ## The rest of a call, given to a `ServerInterceptor`: the interceptors added after it and
+    ## then the handler. `proceed` runs it. Valid only while the interceptor runs.
+    chain: ptr Chain
+    level: int
+
+  ServerInterceptor* = proc (ctx: var ServerContext; next: ServerNext; userData: pointer)
+    {.nimcall, gcsafe, raises: [CatchableError].}
+    ## Runs around every call to a registered method, on the worker thread of the call, before
+    ## the request is decoded. It reads `ctx` (path, metadata, deadline), may set
+    ## `ctx.headers` and `ctx.trailers`, and either calls `next.proceed(ctx)` once or raises
+    ## GrpcError to refuse the call. `proceed` returns when the handler has returned and the
+    ## response has been sent, and raises what the handler raised. `userData` is the pointer
+    ## given to `addInterceptor`.
+
+  Intercept = object
+    fn: ServerInterceptor
+    userData: pointer
+
+  Chain = object
+    ## One call on its way through the interceptors; lives on the stack of `handle`.
+    reg: ptr Registry
+    m: ptr Method
+    call: ptr ServerCall
+    reached: int                 ## how many levels `proceed` has entered
+    failure: ref CatchableError  ## what the rest of the call raised, if it did
+
   ErrorHook* = proc (path: string; e: ref CatchableError) {.nimcall, gcsafe, raises: [].}
     ## Called, on the worker thread, with the method path and the exception of
     ## a handler that failed with anything but a GrpcError.
@@ -76,6 +103,7 @@ type
     maxMessage: int
     maxCallMs: int           ## `Limits.maxCallMs`
     errorHook: ErrorHook     ## read by workers without a lock: set before `start`
+    interceptors: seq[Intercept]   ## the same; the first added is the outermost
 
   GrpcServer* = ref object
     reg: Registry
@@ -217,6 +245,43 @@ proc finishCall(call: var ServerCall; code: StatusCode; msg: string; md: Metadat
 
 # ---------------------------------------------------------------- dispatch
 
+proc runMethod(m: Method; ctx: var ServerContext; call: var ServerCall)
+    {.gcsafe, raises: [CatchableError].} =
+  case m.kind
+  of mkUnary:
+    var req: seq[byte]
+    if not call.recv(req):
+      raise newGrpcError(scUnimplemented, "unary call without a request message")
+    var extra: seq[byte]
+    if call.recv(extra):
+      raise newGrpcError(scUnimplemented, "unary call with more than one request message")
+    let reply = m.unary(ctx, req, m.userData)
+    call.send(reply)
+  of mkStreaming:
+    m.streaming(ctx, call, m.userData)
+
+proc proceed*(next: ServerNext; ctx: var ServerContext) {.gcsafe, raises: [CatchableError].} =
+  ## Runs the rest of the call: the next interceptor, or the handler after the last one.
+  ## Returns when the handler has returned and its response has been sent; raises what the
+  ## handler (or an interceptor further in) raised. To be called once: a second call raises
+  ## GrpcError(INTERNAL) and runs nothing.
+  let c = next.chain
+  if c.reached != next.level:
+    raise newGrpcError(scInternal, "an interceptor called proceed twice")
+  inc c.reached
+  var failure: ref CatchableError
+  try:
+    if next.level < c.reg.interceptors.len:
+      let i = c.reg.interceptors[next.level]
+      i.fn(ctx, ServerNext(chain: c, level: next.level + 1), i.userData)
+    else:
+      runMethod(c.m[], ctx, c.call[])
+  except CatchableError as e:
+    failure = e
+  if failure != nil:       # raised outside the except block (see threadBody)
+    c.failure = failure
+    raise failure
+
 proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: [].} =
   let reg = cast[ptr Registry](userData)
   var ctx = ServerContext(timeoutMs: -1)
@@ -263,20 +328,18 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
   if ctx.path notin reg.methods:
     call.finishCall(scUnimplemented, "unknown method " & ctx.path, @[])
     return
-  let m = reg.methods.getOrDefault(ctx.path)
+  var m = reg.methods.getOrDefault(ctx.path)
   try:
-    case m.kind
-    of mkUnary:
-      var req: seq[byte]
-      if not call.recv(req):
-        raise newGrpcError(scUnimplemented, "unary call without a request message")
-      var extra: seq[byte]
-      if call.recv(extra):
-        raise newGrpcError(scUnimplemented, "unary call with more than one request message")
-      let reply = m.unary(ctx, req, m.userData)
-      call.send(reply)
-    of mkStreaming:
-      m.streaming(ctx, call, m.userData)
+    if reg.interceptors.len == 0:
+      runMethod(m, ctx, call)
+    else:
+      var chain = Chain(reg: reg, m: m.addr, call: call.addr)
+      ServerNext(chain: chain.addr, level: 0).proceed(ctx)
+      # An interceptor that swallowed the error of the call (or lost it: Nim 2.2 can drop an
+      # exception that passes through `finally`) does not turn the call into OK.
+      if chain.failure != nil: raise chain.failure
+      if chain.reached <= reg.interceptors.len:
+        raise newGrpcError(scInternal, "an interceptor returned without calling proceed")
     call.finishCall(scOk, "", ctx.trailers)
   except GrpcError as e:
     call.finishCall(e.code, e.msg, ctx.trailers & e.trailers)
@@ -336,6 +399,16 @@ proc setErrorHook*(s: GrpcServer; hook: ErrorHook) =
   ## hook nothing is logged. Set it before `start`.
   doAssert not s.started, "the error hook must be set before start"
   s.reg.errorHook = hook
+
+proc addInterceptor*(s: GrpcServer; interceptor: ServerInterceptor; userData: pointer = nil) =
+  ## `interceptor` runs around every call to a registered method, the health and reflection
+  ## services included (it can tell them by `ctx.path`); a call to an unknown method does not
+  ## reach it. The first one added is the outermost. It runs on the worker thread of the call,
+  ## so it and what `userData` points to must be thread-safe, and `userData` must stay valid
+  ## while the server runs. Add interceptors before `start`.
+  doAssert not s.started, "interceptors must be added before start"
+  doAssert interceptor != nil, "the interceptor is nil"
+  s.reg.interceptors.add Intercept(fn: interceptor, userData: userData)
 
 proc callUnary(ctx: var ServerContext; request: seq[byte]; userData: pointer): seq[byte]
     {.nimcall, gcsafe, raises: [CatchableError].} =

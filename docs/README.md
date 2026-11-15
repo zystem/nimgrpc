@@ -10,6 +10,7 @@ a **how-to** does one task, a **reference** is complete and dry, an **explanatio
 | [async.md](async.md) | how-to | using the chronos API |
 | [building.md](building.md) | how-to | building, running the tests, how dependencies are chosen and tracked |
 | [static-build.md](static-build.md) | how-to | a fully static client with musl |
+| [interceptors.md](interceptors.md) | how-to | running code around every call: checking a token, logging, adding metadata |
 | [production.md](production.md) | how-to | a checklist to go through before a server faces real clients |
 | [upgrading.md](upgrading.md) | how-to | what to change when moving to each version |
 | [releasing.md](releasing.md) | how-to | making a release (maintainers) |

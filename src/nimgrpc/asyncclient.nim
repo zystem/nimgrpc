@@ -32,6 +32,7 @@ type
     retired: seq[AsyncH2Conn]     ## replaced connections, closed once idle
     connecting: Future[AsyncH2Conn].Raising([CancelledError, GrpcError])
     closed: bool
+    interceptors: seq[AsyncClientInterceptor]   ## the first added is the outermost
 
   AsyncCall* = ref object
     st: AsyncH2Stream
@@ -51,6 +52,37 @@ type
     message*: seq[byte]
     headers*: Metadata
     trailers*: Metadata
+
+  AsyncCallInfo* = ref object
+    ## What an `AsyncClientInterceptor` sees of a call.
+    path*: string
+    metadata*: Metadata      ## sent with the call; may be changed before `next()`
+    timeoutMs*: int          ## the deadline of the call, -1 for none; may be changed before `next()`
+    streaming*: bool
+      ## false: the call is a `unaryCall`, and `next()` completes when it has ended.
+      ## true: the call is a `newCall`, and `next()` completes when the stream is open.
+    headers*: Metadata       ## of a unary call that ended with OK, after `next()`
+    trailers*: Metadata      ## the same
+
+  AsyncClientNext* = proc (): Future[void] {.gcsafe, raises: [].}
+    ## The rest of a call, given to an `AsyncClientInterceptor`: the interceptors added after
+    ## it and then the call itself. Its future fails with what the call failed with. To be
+    ## called once: a second call fails with GrpcError(INTERNAL) and sends nothing.
+  AsyncClientInterceptor* = proc (info: AsyncCallInfo; next: AsyncClientNext): Future[void]
+    {.gcsafe, raises: [].}
+    ## Runs around every call made on the channel. It may change `info.metadata` and
+    ## `info.timeoutMs`, and either awaits `next()` once or fails with GrpcError, which the
+    ## caller gets without anything being sent.
+
+  ClientChain = ref object
+    ## One call on its way through the interceptors.
+    list: seq[AsyncClientInterceptor]
+    info: AsyncCallInfo
+    run: AsyncClientNext         ## the call itself
+    reached: int
+    failure: ref CatchableError
+    unary: UnaryResult           ## the result of a unary call
+    call: AsyncCall              ## the stream of a streaming call, once open
 
 proc connect(ch: AsyncChannel): Future[AsyncH2Conn] {.
     async: (raises: [CancelledError, GrpcError]).} =
@@ -111,6 +143,41 @@ proc connection(ch: AsyncChannel): Future[AsyncH2Conn] {.
   let pending = ch.connecting
   return await pending
 
+proc addInterceptor*(ch: AsyncChannel; interceptor: AsyncClientInterceptor) =
+  ## `interceptor` runs around every `unaryCall` and `newCall` on the channel from now on,
+  ## those of generated clients and of the health client included. The first one added is the
+  ## outermost.
+  doAssert interceptor != nil, "the interceptor is nil"
+  ch.interceptors.add interceptor
+
+proc step(c: ClientChain; level: int): Future[void] {.async.} =
+  ## Level `level` of the chain: an interceptor, or the call after the last one.
+  if c.reached != level:
+    raise newGrpcError(scInternal, "an interceptor called proceed twice")
+  inc c.reached
+  var failure: ref CatchableError
+  try:
+    if level < c.list.len:
+      proc next(): Future[void] {.gcsafe, raises: [].} = c.step(level + 1)
+      await c.list[level](c.info, next)
+    else:
+      await c.run()
+  except CancelledError as e:
+    raise e
+  except CatchableError as e:
+    failure = e
+  if failure != nil:
+    c.failure = failure
+    raise failure
+
+proc runChain(c: ClientChain) {.async.} =
+  ## Runs the interceptors and then `c.run`. An interceptor that swallowed the error of the
+  ## call does not make it succeed.
+  await c.step(0)
+  if c.failure != nil: raise c.failure
+  if c.reached <= c.list.len:
+    raise newGrpcError(scInternal, "an interceptor returned without calling proceed")
+
 proc rstToStatus(code: uint32): StatusCode =
   case code
   of 7: scUnavailable          # REFUSED_STREAM: safe to retry
@@ -119,13 +186,10 @@ proc rstToStatus(code: uint32): StatusCode =
   of 12: scPermissionDenied    # INADEQUATE_SECURITY
   else: scInternal
 
-proc newCall*(ch: AsyncChannel; path: string; metadata: Metadata = @[];
-              timeoutMs = -1; maxMessage = defaultMaxMessage;
-              compression = ""): Future[AsyncCall] {.async.} =
-  ## Opens a call to `path` ("/package.Service/Method"). `timeoutMs` bounds
-  ## the whole call. With `compression = "gzip"` messages are sent
-  ## compressed; compressed replies are always accepted, and `maxMessage`
-  ## limits them after decompression.
+proc openCall(ch: AsyncChannel; path: string; metadata: Metadata;
+              timeoutMs: int; maxMessage: int;
+              compression: string): Future[AsyncCall] {.async.} =
+  ## `newCall` without the interceptors.
   if compression notin ["", "identity", "gzip"]:
     raise newGrpcError(scInvalidArgument, "unsupported compression " & compression.escape)
   var headers = @[(":method", "POST"), (":scheme", ch.scheme), (":path", path),
@@ -150,6 +214,39 @@ proc newCall*(ch: AsyncChannel; path: string; metadata: Metadata = @[];
 proc close*(call: AsyncCall) =
   ## Releases the stream; an unfinished call is cancelled.
   if call.st != nil: call.st.release()
+
+proc openInto(c: ClientChain; ch: AsyncChannel; maxMessage: int;
+              compression: string) {.async.} =
+  c.call = await ch.openCall(c.info.path, c.info.metadata, c.info.timeoutMs,
+                             maxMessage, compression)
+
+proc newCall*(ch: AsyncChannel; path: string; metadata: Metadata = @[];
+              timeoutMs = -1; maxMessage = defaultMaxMessage;
+              compression = ""): Future[AsyncCall] {.async.} =
+  ## Opens a call to `path` ("/package.Service/Method"). `timeoutMs` bounds
+  ## the whole call. With `compression = "gzip"` messages are sent
+  ## compressed; compressed replies are always accepted, and `maxMessage`
+  ## limits them after decompression. The channel's interceptors
+  ## (`addInterceptor`) run first and may change the metadata and the deadline.
+  if ch.interceptors.len == 0:
+    return await ch.openCall(path, metadata, timeoutMs, maxMessage, compression)
+  let chain = ClientChain(list: ch.interceptors,
+    info: AsyncCallInfo(path: path, metadata: metadata, timeoutMs: timeoutMs, streaming: true))
+  chain.run = proc (): Future[void] {.gcsafe, raises: [].} =
+    chain.openInto(ch, maxMessage, compression)
+  var failure: ref CatchableError
+  try:
+    await chain.runChain()
+  except CancelledError as e:
+    if chain.call != nil: chain.call.close()
+    raise e
+  except CatchableError as e:
+    failure = e
+  if failure != nil:
+    # An interceptor failed after the stream was opened: the caller gets no call to close.
+    if chain.call != nil: chain.call.close()
+    raise failure
+  return chain.call
 
 proc cancel*(call: AsyncCall) =
   ## Resets the call; later `send` and `recv` raise CANCELLED.
@@ -337,7 +434,7 @@ proc recv*(call: AsyncCall): Future[Option[seq[byte]]] {.async.} =
 
 proc unaryOnce(ch: AsyncChannel; path: string; request: seq[byte]; metadata: Metadata;
                timeoutMs: int; maxMessage: int; compression: string): Future[UnaryResult] {.async.} =
-  let call = await ch.newCall(path, metadata, timeoutMs, maxMessage, compression)
+  let call = await ch.openCall(path, metadata, timeoutMs, maxMessage, compression)
   var err: ref CatchableError
   try:
     await call.send(request)
@@ -363,14 +460,9 @@ const
   refusedRetries* = 2        ## how many more times `unaryCall` sends a call the server refused
   refusedBackoffMs = 20      ## the wait before the first of them, doubled for each next
 
-proc unaryCall*(ch: AsyncChannel; path: string; request: seq[byte];
-                metadata: Metadata = @[]; timeoutMs = -1;
-                maxMessage = defaultMaxMessage; compression = ""): Future[UnaryResult] {.async.} =
-  ## Sends one message and returns the one reply. Raises GrpcError for any
-  ## status other than OK. A call the server refused without starting on it (REFUSED_STREAM, or
-  ## a GOAWAY that came before it) is sent again, on a new connection if the old one is going
-  ## away, up to `refusedRetries` times, within `timeoutMs`; calls that may have run are never
-  ## repeated.
+proc unaryRetrying(ch: AsyncChannel; path: string; request: seq[byte];
+                   metadata: Metadata; timeoutMs: int; maxMessage: int;
+                   compression: string): Future[UnaryResult] {.async.} =
   let t0 = Moment.now()
   var attempt = 0
   while true:
@@ -387,3 +479,27 @@ proc unaryCall*(ch: AsyncChannel; path: string; request: seq[byte];
       raise failure
     await sleepAsync(chronos.milliseconds(refusedBackoffMs shl attempt))
     inc attempt
+
+proc unaryInto(c: ClientChain; ch: AsyncChannel; request: seq[byte]; maxMessage: int;
+               compression: string) {.async.} =
+  c.unary = await unaryRetrying(ch, c.info.path, request, c.info.metadata, c.info.timeoutMs,
+                                maxMessage, compression)
+  c.info.headers = c.unary.headers
+  c.info.trailers = c.unary.trailers
+
+proc unaryCall*(ch: AsyncChannel; path: string; request: seq[byte];
+                metadata: Metadata = @[]; timeoutMs = -1;
+                maxMessage = defaultMaxMessage; compression = ""): Future[UnaryResult] {.async.} =
+  ## Sends one message and returns the one reply. Raises GrpcError for any
+  ## status other than OK. A call the server refused without starting on it (REFUSED_STREAM, or
+  ## a GOAWAY that came before it) is sent again, on a new connection if the old one is going
+  ## away, up to `refusedRetries` times, within `timeoutMs`; calls that may have run are never
+  ## repeated. The channel's interceptors (`addInterceptor`) run once around all of it.
+  if ch.interceptors.len == 0:
+    return await unaryRetrying(ch, path, request, metadata, timeoutMs, maxMessage, compression)
+  let chain = ClientChain(list: ch.interceptors,
+    info: AsyncCallInfo(path: path, metadata: metadata, timeoutMs: timeoutMs))
+  chain.run = proc (): Future[void] {.gcsafe, raises: [].} =
+    chain.unaryInto(ch, request, maxMessage, compression)
+  await chain.runChain()
+  return move chain.unary

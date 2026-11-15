@@ -37,6 +37,7 @@ type
     conn: Conn              ## the connection new calls use
     retired: seq[Conn]      ## replaced connections, closed once idle
     closed: bool
+    interceptors: seq[Intercept]   ## under `lock`; the first added is the outermost
     inflight: Atomic[int]   ## calls inside a procedure of this module on some thread; `close` waits for them
 
   GrpcChannel* = object
@@ -61,6 +62,51 @@ type
     message*: seq[byte]
     headers*: Metadata
     trailers*: Metadata
+
+  ClientCallInfo* = object
+    ## What a `ClientInterceptor` sees of a call.
+    path*: string
+    metadata*: Metadata      ## sent with the call; may be changed before `proceed`
+    timeoutMs*: int          ## the deadline of the call, -1 for none; may be changed before `proceed`
+    streaming*: bool
+      ## false: the call is a `unaryCall`, and `proceed` returns when it has ended.
+      ## true: the call is a `newCall`, and `proceed` returns when the stream is open.
+    headers*: Metadata       ## of a unary call that ended with OK, after `proceed`
+    trailers*: Metadata      ## the same
+
+  ClientNext* = object
+    ## The rest of a call, given to a `ClientInterceptor`: the interceptors added after it and
+    ## then the call itself. `proceed` runs it. Valid only while the interceptor runs.
+    chain: ptr ClientChain
+    level: int
+
+  ClientInterceptor* = proc (info: var ClientCallInfo; next: ClientNext; userData: pointer)
+    {.nimcall, gcsafe, raises: [CatchableError].}
+    ## Runs around every call made on the channel, on the thread that makes it. It may change
+    ## `info.metadata` and `info.timeoutMs`, and either calls `next.proceed(info)` once or
+    ## raises GrpcError, which the caller gets without anything being sent. `proceed` raises
+    ## what the call raised. `userData` is the pointer given to `addInterceptor`.
+
+  Intercept = object
+    fn: ClientInterceptor
+    userData: pointer
+
+  ClientChain = object
+    ## One call on its way through the interceptors; lives on the stack of the caller.
+    list: seq[Intercept]
+    run: proc (chain: ptr ClientChain; info: var ClientCallInfo)
+           {.nimcall, gcsafe, raises: [CatchableError].}
+    ch: ptr ChannelObj
+    reached: int
+    failure: ref CatchableError
+    # the arguments of the call and its result
+    request: ptr UncheckedArray[byte]
+    requestLen: int
+    maxMessage: int
+    compression: string
+    unary: UnaryResult
+    call: ptr ClientCall
+    opened: bool                 ## `call[]` holds an open stream
 
 template inFlight(chan: ptr ChannelObj) =
   ## The first statement of a procedure that uses a call or the channel: `close` of the channel
@@ -172,16 +218,59 @@ proc rstToStatus(code: uint32): StatusCode =
   of 12: scPermissionDenied    # INADEQUATE_SECURITY
   else: scInternal
 
-proc newCall*(ch: GrpcChannel; path: string; metadata: Metadata = @[];
-              timeoutMs = -1; maxMessage = defaultMaxMessage;
-              compression = ""): ClientCall =
-  ## Opens a call to `path` ("/package.Service/Method"). `timeoutMs` bounds
-  ## the whole call. With `compression = "gzip"` messages are sent
-  ## compressed (see `send`); compressed replies are always accepted, and
-  ## `maxMessage` limits them after decompression.
+proc addInterceptor*(ch: GrpcChannel; interceptor: ClientInterceptor; userData: pointer = nil) =
+  ## `interceptor` runs around every `unaryCall` and `newCall` on the channel from now on,
+  ## those of generated clients and of the health client included. The first one added is the
+  ## outermost. It runs on the thread that makes the call, so with a channel used from several
+  ## threads it and what `userData` points to must be thread-safe; `userData` must stay valid
+  ## until the channel is closed.
+  doAssert interceptor != nil, "the interceptor is nil"
+  let c = ch.p
+  acquire(c.lock)
+  c.interceptors.add Intercept(fn: interceptor, userData: userData)
+  release(c.lock)
+
+proc interceptorsOf(c: ptr ChannelObj): seq[Intercept] =
+  acquire(c.lock)
+  result = c.interceptors
+  release(c.lock)
+
+proc proceed*(next: ClientNext; info: var ClientCallInfo) {.gcsafe, raises: [CatchableError].} =
+  ## Runs the rest of the call: the next interceptor, or the call itself after the last one.
+  ## For a unary call it returns when the call has ended with OK; for a streaming call, when the
+  ## stream is open. It raises what the call raised. To be called once: a second call raises
+  ## GrpcError(INTERNAL) and sends nothing.
+  let c = next.chain
+  if c.reached != next.level:
+    raise newGrpcError(scInternal, "an interceptor called proceed twice")
+  inc c.reached
+  var failure: ref CatchableError
+  try:
+    if next.level < c.list.len:
+      let i = c.list[next.level]
+      i.fn(info, ClientNext(chain: c, level: next.level + 1), i.userData)
+    else:
+      c.run(c, info)
+  except CatchableError as e:
+    failure = e
+  if failure != nil:       # raised outside the except block (see `mapErrors`)
+    c.failure = failure
+    raise failure
+
+proc runChain(chain: var ClientChain; info: var ClientCallInfo) =
+  ## Runs the interceptors and then `chain.run`. An interceptor that swallowed the error of the
+  ## call does not make it succeed.
+  ClientNext(chain: chain.addr, level: 0).proceed(info)
+  if chain.failure != nil: raise chain.failure
+  if chain.reached <= chain.list.len:
+    raise newGrpcError(scInternal, "an interceptor returned without calling proceed")
+
+proc openCall(c: ptr ChannelObj; path: string; metadata: Metadata;
+              timeoutMs: int; maxMessage: int; compression: string): ClientCall
+    {.gcsafe, raises: [CatchableError].} =
+  ## `newCall` without the interceptors.
   if compression notin ["", "identity", "gzip"]:
     raise newGrpcError(scInvalidArgument, "unsupported compression " & compression.escape)
-  let c = ch.p
   inFlight(c)
   var headers = @[(":method", "POST"), (":scheme", c.scheme), (":path", path),
                   (":authority", c.authority), ("content-type", grpcContentType),
@@ -210,6 +299,39 @@ proc newCall*(ch: GrpcChannel; path: string; metadata: Metadata = @[];
   finally:
     release(c.lock)
   if why.len > 0: raise newGrpcError(scUnavailable, why)
+
+proc runOpen(chain: ptr ClientChain; info: var ClientCallInfo)
+    {.nimcall, gcsafe, raises: [CatchableError].} =
+  var opened = openCall(chain.ch, info.path, info.metadata, info.timeoutMs,
+                        chain.maxMessage, chain.compression)
+  chain.call[] = move opened
+  chain.opened = true
+
+proc newCall*(ch: GrpcChannel; path: string; metadata: Metadata = @[];
+              timeoutMs = -1; maxMessage = defaultMaxMessage;
+              compression = ""): ClientCall =
+  ## Opens a call to `path` ("/package.Service/Method"). `timeoutMs` bounds
+  ## the whole call. With `compression = "gzip"` messages are sent
+  ## compressed (see `send`); compressed replies are always accepted, and
+  ## `maxMessage` limits them after decompression. The channel's interceptors
+  ## (`addInterceptor`) run first and may change the metadata and the deadline.
+  let c = ch.p
+  inFlight(c)
+  let list = c.interceptorsOf()
+  if list.len == 0:
+    return openCall(c, path, metadata, timeoutMs, maxMessage, compression)
+  var info = ClientCallInfo(path: path, metadata: metadata, timeoutMs: timeoutMs, streaming: true)
+  var chain = ClientChain(list: list, run: runOpen, ch: c, maxMessage: maxMessage,
+                          compression: compression, call: result.addr)
+  var failure: ref CatchableError
+  try:
+    runChain(chain, info)
+  except CatchableError as e:
+    failure = e
+  if failure != nil:
+    # An interceptor failed after the stream was opened: the caller gets no call to close.
+    if chain.opened: result.st.release()
+    raise failure
 
 proc close*(call: var ClientCall) =
   ## Releases the stream; an unfinished call is cancelled.
@@ -372,10 +494,11 @@ proc recv*(call: var ClientCall; msg: var seq[byte]): bool =
     call.finish()
     return false
 
-proc unaryOnce(ch: GrpcChannel; path: string; request: openArray[byte]; metadata: Metadata;
-               timeoutMs: int; maxMessage: int; compression: string): UnaryResult =
-  inFlight(ch.p)
-  var call = ch.newCall(path, metadata, timeoutMs, maxMessage, compression)
+proc unaryOnce(c: ptr ChannelObj; path: string; request: openArray[byte]; metadata: Metadata;
+               timeoutMs: int; maxMessage: int; compression: string): UnaryResult
+    {.gcsafe, raises: [CatchableError].} =
+  inFlight(c)
+  var call = openCall(c, path, metadata, timeoutMs, maxMessage, compression)
   var res: UnaryResult
   withCleanup:
     call.send(request)
@@ -395,15 +518,9 @@ const
   refusedRetries* = 2        ## how many more times `unaryCall` sends a call the server refused
   refusedBackoffMs = 20      ## the wait before the first of them, doubled for each next
 
-proc unaryCall*(ch: GrpcChannel; path: string; request: openArray[byte];
-                metadata: Metadata = @[]; timeoutMs = -1;
-                maxMessage = defaultMaxMessage; compression = ""): UnaryResult =
-  ## Sends one message and returns the one reply. Raises GrpcError for any
-  ## status other than OK. A call the server refused without starting on it (REFUSED_STREAM, or
-  ## a GOAWAY that came before it, as when a server drains or has not yet told its limits) is
-  ## sent again, on a new connection if the old one is going away, up to `refusedRetries` times,
-  ## within `timeoutMs`; the error then has `unprocessed` set. Calls that may have run are never
-  ## repeated.
+proc unaryRetrying(c: ptr ChannelObj; path: string; request: openArray[byte];
+                   metadata: Metadata; timeoutMs: int; maxMessage: int;
+                   compression: string): UnaryResult {.gcsafe, raises: [CatchableError].} =
   let t0 = getMonoTime()
   var attempt = 0
   while true:
@@ -412,7 +529,7 @@ proc unaryCall*(ch: GrpcChannel; path: string; request: openArray[byte];
       left = max(0, timeoutMs - int((getMonoTime() - t0).inMilliseconds))
     var failure: ref GrpcError
     try:
-      return unaryOnce(ch, path, request, metadata, left, maxMessage, compression)
+      return unaryOnce(c, path, request, metadata, left, maxMessage, compression)
     except GrpcError as e:
       failure = e
     if not failure.unprocessed or attempt >= refusedRetries or
@@ -420,3 +537,33 @@ proc unaryCall*(ch: GrpcChannel; path: string; request: openArray[byte];
       raise failure
     sleep(refusedBackoffMs shl attempt)
     inc attempt
+
+proc runUnary(chain: ptr ClientChain; info: var ClientCallInfo)
+    {.nimcall, gcsafe, raises: [CatchableError].} =
+  chain.unary = unaryRetrying(chain.ch, info.path,
+                              toOpenArray(chain.request, 0, chain.requestLen - 1),
+                              info.metadata, info.timeoutMs, chain.maxMessage, chain.compression)
+  info.headers = chain.unary.headers
+  info.trailers = chain.unary.trailers
+
+proc unaryCall*(ch: GrpcChannel; path: string; request: openArray[byte];
+                metadata: Metadata = @[]; timeoutMs = -1;
+                maxMessage = defaultMaxMessage; compression = ""): UnaryResult =
+  ## Sends one message and returns the one reply. Raises GrpcError for any
+  ## status other than OK. A call the server refused without starting on it (REFUSED_STREAM, or
+  ## a GOAWAY that came before it, as when a server drains or has not yet told its limits) is
+  ## sent again, on a new connection if the old one is going away, up to `refusedRetries` times,
+  ## within `timeoutMs`; the error then has `unprocessed` set. Calls that may have run are never
+  ## repeated. The channel's interceptors (`addInterceptor`) run once around all of it.
+  let c = ch.p
+  inFlight(c)
+  let list = c.interceptorsOf()
+  if list.len == 0:
+    return unaryRetrying(c, path, request, metadata, timeoutMs, maxMessage, compression)
+  var info = ClientCallInfo(path: path, metadata: metadata, timeoutMs: timeoutMs)
+  var chain = ClientChain(list: list, run: runUnary, ch: c, maxMessage: maxMessage,
+                          compression: compression, requestLen: request.len)
+  if request.len > 0:
+    chain.request = cast[ptr UncheckedArray[byte]](request[0].unsafeAddr)
+  runChain(chain, info)
+  move chain.unary

@@ -50,13 +50,20 @@ are versioned together ([upgrading.md](upgrading.md) says when it does not matte
 
 **How do I know who the client is?** From metadata (`ctx.metadata`), which the program
 checks. With mutual TLS the server admits only clients whose certificate the given CA signed,
-but a handler is not told which certificate it was.
+but a handler is not told which certificate it was. A server interceptor can check the
+metadata once for every call ([interceptors.md](interceptors.md)); it does not see the certificate either.
 
 **How do I send an error with a code?** `raise newGrpcError(scNotFound, "no such user")` in
 the handler. Anything else reaches the client as UNKNOWN `internal error`.
 
 **Where are the logs?** There are none: the library prints nothing. `srv.setErrorHook(hook)`
-gives the program each exception a handler did not turn into a `GrpcError`.
+gives the program each exception a handler did not turn into a `GrpcError`. To log or time
+every call, use a server interceptor ([interceptors.md](interceptors.md)).
+
+**Can I run code around every call (authentication, logging, metrics)?** Yes: add an interceptor
+with `srv.addInterceptor` (or `ch.addInterceptor` on a client). It runs around every call, can
+refuse it, and sees the metadata and the status but no messages. See
+[interceptors.md](interceptors.md).
 
 **Are calls retried?** `unaryCall` sends a call again, twice at most and within its deadline,
 only when the server refused it before starting (`e.unprocessed`). Streaming calls and calls
