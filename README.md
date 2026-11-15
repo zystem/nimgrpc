@@ -65,7 +65,7 @@ server stopped
 
 The output of `git clone` and `nimble install` is left out (nimble downloads bearssl, chronos
 and what they need). `tools/build-nghttp2.sh` downloads nghttp2, checks its SHA-256 and builds it
-into `deps/nghttp2`. Run on 2026-11-15 in a fresh clone (Ubuntu 24.04, x86-64, Nim 2.4.0): the
+into `deps/nghttp2`. Run on 2026-11-15 in a fresh clone (Linux Mint 22.3, x86-64, Nim 2.4.0): the
 three steps took 16, 8 and 3 seconds.
 
 **Next:** [examples/README.md](examples/README.md) goes on with a service generated from a

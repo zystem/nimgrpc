@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+- Examples: `examples/hello.nim` (a server and a client in one process, no generated code), `examples/greeter/` (a service from `hello.proto` through generated code: a server with health and reflection, a client, and both on chronos), and [examples/README.md](examples/README.md), a tutorial with what every command prints.
+- `tools/build-nghttp2.sh`: downloads nghttp2 1.68.1, checks its SHA-256 and builds it into `deps/nghttp2` of the clone, without root. Builds inside the repository find it there, or where `NGHTTP2_PREFIX` points; `-d:nghttp2Prefix` on the command line still wins. A program that uses the installed library is not affected.
+- `tests/texamples.nim`: builds and runs every `nim c -r examples/...` shown in `README.md` and `examples/README.md` and compares the output with the document; where `protoc` is installed it also checks that `hello_pb.nim` is what the plugin generates.
+- [docs/README.md](docs/README.md): an index of the documents with the kind of each page.
+
+### Changed
+- README: starts with what the library is, when to use it and when not, a picture of the parts, a first run with its output, a table of ways to install, a glossary and the documents by purpose; the description of the API follows unchanged, the status went below it.
+
+### Fixed
+- README: the health snippet `let health = newHealth()` does not compile beside `import nimgrpc/health` (the name is the module's); it is `let h = newHealth()`.
+
 ## 0.5.0 — 2026-11-15
 
 ### Security

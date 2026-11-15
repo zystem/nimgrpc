@@ -4,8 +4,7 @@ A tutorial: one path, and after each command what it prints. It starts where
 [Try it](../README.md#try-it) of the README ends: the repository is cloned, `nimble install -y
 --depsOnly` has run and `tools/build-nghttp2.sh` has built nghttp2 into `deps/nghttp2`. Run every
 command from the root of the repository. The compiler prints nothing here when it succeeds
-(`examples/config.nims` turns its hints off); the first build of a program takes from a few
-seconds (hello) to about half a minute (the chronos one).
+(`examples/config.nims` turns its hints off), and a build takes a few seconds.
 
 Each step is checked by `tests/texamples.nim`: it runs the programs and compares what they print
 with the blocks below.
@@ -94,5 +93,5 @@ handlers and calls to write.
 - A server that faces clients you do not trust: the "slow or stalled peer" row of
   [docs/threat-model.md](../docs/threat-model.md).
 
-What was run: all five steps on 2026-11-15, on Ubuntu 24.04 (x86-64) with Nim 2.4.0 and protoc
+What was run: all five steps on 2026-11-15, on Linux Mint 22.3 (x86-64) with Nim 2.4.0, nghttp2 1.68.1 and protoc
 3.21.12, in a fresh clone.
