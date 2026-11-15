@@ -47,13 +47,28 @@ proc putFixed32*(w: var PbWriter; v: uint32) =
 proc putFixed64*(w: var PbWriter; v: uint64) =
   for i in 0 ..< 8: w.buf.add byte((v shr (8 * i)) and 0xff)
 
+const
+  largeValue = 64 * 1024  ## a bytes or string value from this size on gets its room in one step
+  lengthSlack = 64        ## room left after it for the lengths of the messages around it
+
+proc addValue(w: var PbWriter; data: openArray[byte]) =
+  ## Appends `data`. For a large value the buffer is first given room for the value and for
+  ## what `endLen` of the enclosing messages inserts later, so the value is copied once: grown
+  ## step by step, the buffer was reallocated when the value went in and again when the length
+  ## in front of it turned out to need more than one byte, and a 4 MiB field cost 10 MiB.
+  if data.len >= largeValue and w.buf.len + data.len + lengthSlack > w.buf.capacity:
+    var roomy = newSeqOfCap[byte](w.buf.len + data.len + lengthSlack)
+    roomy.add w.buf
+    w.buf = move roomy
+  w.buf.add data
+
 proc putBytes*(w: var PbWriter; data: openArray[byte]) =
   w.putVarint(data.len.uint64)
-  w.buf.add data
+  w.addValue data
 
 proc putString*(w: var PbWriter; s: string) =
   w.putVarint(s.len.uint64)
-  if s.len > 0: w.buf.add s.toOpenArrayByte(0, s.high)
+  if s.len > 0: w.addValue s.toOpenArrayByte(0, s.high)
 
 proc zigzag32*(v: int32): uint64 {.inline.} = uint64(cast[uint32]((v shl 1) xor (v shr 31)))
 proc zigzag64*(v: int64): uint64 {.inline.} = cast[uint64]((v shl 1) xor (v shr 63))

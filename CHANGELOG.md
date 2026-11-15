@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- Encoder (`nimgrpc/protobuf`, used by generated code): a `bytes` or `string` field of 64 KiB or more is copied once into a buffer of the size of the message. Before, the buffer was reallocated when the field went in and again when the length in front of it needed more than one byte, so a message with one 4 MiB field cost about 10 MiB while it was encoded. The wire form is the same and generated code does not have to be regenerated. This was the library's part of the pentest's finding 4 (responses a client asks for and never reads): 200 such calls asking for 4 MB responses held 2.53 GB before and 1.76 GB after (measured locally on 2026-11-15, blocking server, release build). What is left is the handler's own message and one encoded copy per waiting handler; [docs/threat-model.md](docs/threat-model.md) says how to bound it. Tests: `tests/tcodec.nim` (suite "large values").
+
 ## 0.5.0 — 2026-11-15
 
 ### Security
