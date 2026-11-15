@@ -13,7 +13,7 @@
 
 - **Authentication or authorization of calls** beyond what TLS and metadata give; the program decides.
 - **Protection from a compromised host** or from a program that picks plaintext HTTP/2 on an untrusted network.
-- **Limits per client**: no rate limiting or connection quotas; set them in the program or in front of it.
-- **Maturity**: the project is young (0.0.x), interop-tested against grpc-go on 18 cases and h2spec at 135 of 146, not run in large production.
+- **Rate limiting of calls**: there is none; set it in the program or in front of it. Connections can be limited in all and per address (`Limits.maxConnections`, `maxConnectionsPerIp`, both off by default; [production.md](production.md)).
+- **Maturity**: the project is young (0.x), interop-tested against grpc-go on 18 cases and h2spec at 135 of 146, not run in large production.
 - **A certified cryptographic module**: BearSSL is not certified, and no claim is made.
 - **Fixes for old releases** beyond what [SECURITY.md](../SECURITY.md) says.
