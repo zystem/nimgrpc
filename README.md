@@ -220,8 +220,8 @@ Dependencies: Nim 2.2.12 or later, [nim-bearssl](https://github.com/status-im/ni
 zlib (`-lz`; `-d:zlibStatic` links `libz.a`) and nghttp2, linked statically. Build nghttp2 once:
 
 ```sh
-curl -LO https://github.com/nghttp2/nghttp2/releases/download/v1.68.0/nghttp2-1.68.0.tar.xz
-tar xf nghttp2-1.68.0.tar.xz && cd nghttp2-1.68.0
+curl -LO https://github.com/nghttp2/nghttp2/releases/download/v1.68.1/nghttp2-1.68.1.tar.xz
+tar xf nghttp2-1.68.1.tar.xz && cd nghttp2-1.68.1
 cmake -S . -B build -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF \
   -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX=/opt/nghttp2

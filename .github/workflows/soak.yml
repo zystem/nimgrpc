@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 env:
-  NGHTTP2_VERSION: 1.68.0
+  NGHTTP2_VERSION: 1.68.1
 
 jobs:
   soak:

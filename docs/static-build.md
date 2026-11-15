@@ -33,7 +33,7 @@ git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib
 (cd zlib && ./configure --static --prefix=/opt/musl-deps && make -j && make install)
 
 # nghttp2
-tar xf nghttp2-1.68.0.tar.xz && cd nghttp2-1.68.0
+tar xf nghttp2-1.68.1.tar.xz && cd nghttp2-1.68.1
 cmake -S . -B build -DCMAKE_C_COMPILER=$CC -DENABLE_LIB_ONLY=ON \
   -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel \
   -DCMAKE_INSTALL_PREFIX=/opt/musl-deps
