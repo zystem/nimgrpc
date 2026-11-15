@@ -10,13 +10,26 @@ failure that now passes is only reported.
 import sys
 import xml.etree.ElementTree as ET
 
-# "section: test name" as h2spec writes them (package, then the name of the test case)
-KNOWN = {
-    "blocking": set(),
-    "async": set(),
+# "section: test name" as h2spec writes them. The first nine are differences between RFC 7540,
+# which h2spec 2.6.0 tests, and RFC 9113, which nghttp2 follows. The last two are races: the
+# test server answers at once, the answer can leave before the stray frame arrives, and h2spec
+# looks only at the first frame it gets. Either adapter can lose either race.
+RFC = {
+    "http2/5.1: closed: Sends a DATA frame after sending RST_STREAM frame",
+    "http2/5.1: closed: Sends a HEADERS frame after sending RST_STREAM frame",
+    "http2/5.1: closed: Sends a DATA frame",
+    "http2/5.1: closed: Sends a HEADERS frame",
+    "http2/5.1.1: Sends stream identifier that is numerically smaller than previous",
+    "http2/5.3.1: Sends PRIORITY frame that depend on itself",
+    "http2/5.4.1: Sends an invalid PING frame for connection close",
+    "http2/6.3: Sends a PRIORITY frame with 0x0 stream identifier",
+    "http2/6.9.1: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1 on a stream",
 }
-# Until the lists above are filled from a first run in CI: how many may fail (docs/h2spec.md).
-KNOWN_COUNT = {"blocking": 9, "async": 10}
+RACES = {
+    "http2/5.1: half closed (remote): Sends a HEADERS frame",
+    'http2/6.1: Sends a DATA frame on the stream that is not in "open" or "half-closed (local)" state',
+}
+KNOWN = {"blocking": RFC | RACES, "async": RFC | RACES}
 
 def main():
     if len(sys.argv) != 3 or sys.argv[2] not in KNOWN: sys.exit(__doc__)
@@ -31,12 +44,9 @@ def main():
     for f in failed: print("  failed:", f)
     if total == 0: sys.exit("the report has no tests")
     known = KNOWN[adapter]
-    if known:
-        new = [f for f in failed if f not in known]
-        for f in sorted(known - set(failed)): print("  known failure that passes now:", f)
-        if new: sys.exit("%d failure(s) not in the known list" % len(new))
-    elif len(failed) > KNOWN_COUNT[adapter]:
-        sys.exit("more failures than the %d that are known" % KNOWN_COUNT[adapter])
+    new = [f for f in failed if f not in known]
+    for f in sorted(known - set(failed)): print("  known failure that passed this time:", f)
+    if new: sys.exit("%d failure(s) not in the known list" % len(new))
 
 if __name__ == "__main__":
     main()
