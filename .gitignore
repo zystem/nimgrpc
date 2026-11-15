@@ -20,3 +20,4 @@ nimcache/
 !/tests/interop/gohealth/
 !/tests/interop/*.sh
 !/tests/interop/goreflect/
+/conformance-out/
