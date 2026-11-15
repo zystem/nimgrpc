@@ -19,7 +19,7 @@ Use it when:
 Do not use it when you need:
 
 - TLS 1.3: BearSSL has TLS 1.2 only;
-- interceptors, client-side load balancing, xDS, gRPC-Web, or retries of calls the server has
+- client-side load balancing, xDS, gRPC-Web, or retries of calls the server has
   already started: none of these exist here ([docs/roadmap.md](docs/roadmap.md));
 - a platform other than Linux: the tests run on Linux x86-64 only, and nothing else has been run;
 - a stable API: the version is 0.x, and a second number may change behaviour
@@ -109,7 +109,8 @@ distributions often ship an older one.
 [docs/README.md](docs/README.md) lists every page and says what kind it is.
 
 - **To learn it**: [examples/README.md](examples/README.md) (tutorial), [Using the library](#using-the-library) below,
-  [docs/async.md](docs/async.md) (chronos).
+  [docs/async.md](docs/async.md) (chronos), [docs/interceptors.md](docs/interceptors.md) (code
+  around every call: authentication, logging).
 - **To know how it works and what it promises**: [docs/architecture.md](docs/architecture.md),
   [docs/threat-model.md](docs/threat-model.md), [docs/security-requirements.md](docs/security-requirements.md),
   [docs/interop.md](docs/interop.md), [docs/h2spec.md](docs/h2spec.md).
@@ -271,6 +272,31 @@ var reply: seq[byte]
 while call.recv(reply): discard  # raises GrpcError on a non-OK status
 call.close()
 ```
+
+### Interceptors
+
+An interceptor is a procedure the library runs around every call: a server's checks a token or
+logs the call, a client's adds metadata. It calls `proceed` to let the call go on or raises
+`GrpcError` to refuse it. A server's are added before `start`; the first added is the outermost.
+
+```nim
+proc checkToken(ctx: var ServerContext; next: ServerNext; userData: pointer)
+    {.nimcall, gcsafe, raises: [CatchableError].} =
+  if ctx.metadata.get("authorization") != "Bearer s3cret":
+    raise newGrpcError(scUnauthenticated, "missing or wrong token")
+  next.proceed(ctx)             # runs the handler; returns when the response has been sent
+srv.addInterceptor(checkToken)  # before srv.start()
+
+proc addToken(info: var ClientCallInfo; next: ClientNext; userData: pointer)
+    {.nimcall, gcsafe, raises: [CatchableError].} =
+  info.metadata.add ("authorization", "Bearer s3cret")
+  next.proceed(info)
+ch.addInterceptor(addToken)     # runs around every call on this channel
+```
+
+An interceptor sees no messages, and it is where to authenticate by metadata, not by the
+peer's certificate. The chronos server and channel take closures. What the rules are and what an
+interceptor cannot do: [docs/interceptors.md](docs/interceptors.md).
 
 ### chronos
 

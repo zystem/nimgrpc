@@ -59,6 +59,17 @@ type
     ## Called with the method path and the exception of a handler that failed
     ## with anything but a GrpcError.
 
+  AsyncServerNext* = proc (): Future[void] {.gcsafe, raises: [].}
+    ## The rest of a call, given to an `AsyncServerInterceptor`: the interceptors added after
+    ## it and then the handler. Its future completes when the handler has completed and the
+    ## response has been sent, and fails with what the handler failed with. To be called once:
+    ## a second call fails with GrpcError(INTERNAL) and runs nothing.
+  AsyncServerInterceptor* = proc (ctx: AsyncServerContext; next: AsyncServerNext): Future[void]
+    {.gcsafe, raises: [].}
+    ## Runs around every call to a registered method, before the request is decoded. It reads
+    ## `ctx` (path, metadata, deadline), may set `ctx.headers` and `ctx.trailers`, and either
+    ## awaits `next()` once or fails with GrpcError to refuse the call.
+
   MethodKind = enum mkUnary, mkStreaming
   Method = object
     case kind: MethodKind
@@ -75,7 +86,17 @@ type
     policy: PingPolicy
     limits: Limits
     errorHook: ErrorHook
+    interceptors: seq[AsyncServerInterceptor]   ## the first added is the outermost
     h2: AsyncH2Server
+
+  Chain = ref object
+    ## One call on its way through the interceptors.
+    s: AsyncGrpcServer
+    m: Method
+    ctx: AsyncServerContext
+    call: AsyncServerCall
+    reached: int                 ## how many levels have been entered
+    failure: ref CatchableError  ## what the rest of the call failed with, if it did
 
 # ---------------------------------------------------------------- AsyncServerCall
 
@@ -222,6 +243,26 @@ proc runMethod(m: Method; ctx: AsyncServerContext; call: AsyncServerCall) {.asyn
   of mkStreaming:
     await m.streaming(ctx, call)
 
+proc step(c: Chain; level: int): Future[void] {.async.} =
+  ## Level `level` of the chain: an interceptor, or the handler after the last one.
+  if c.reached != level:
+    raise newGrpcError(scInternal, "an interceptor called proceed twice")
+  inc c.reached
+  var failure: ref CatchableError
+  try:
+    if level < c.s.interceptors.len:
+      proc next(): Future[void] {.gcsafe, raises: [].} = c.step(level + 1)
+      await c.s.interceptors[level](c.ctx, next)
+    else:
+      await runMethod(c.m, c.ctx, c.call)
+  except CancelledError as e:
+    raise e
+  except CatchableError as e:
+    failure = e
+  if failure != nil:
+    c.failure = failure
+    raise failure
+
 proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raises: []).} =
   let ctx = AsyncServerContext(timeoutMs: -1)
   var meth, contentType, encoding = ""
@@ -268,7 +309,15 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
     return
   let m = s.methods.getOrDefault(ctx.path)
   try:
-    await runMethod(m, ctx, call)
+    if s.interceptors.len == 0:
+      await runMethod(m, ctx, call)
+    else:
+      let chain = Chain(s: s, m: m, ctx: ctx, call: call)
+      await chain.step(0)
+      # An interceptor that swallowed the error of the call does not turn it into OK.
+      if chain.failure != nil: raise chain.failure
+      if chain.reached <= s.interceptors.len:
+        raise newGrpcError(scInternal, "an interceptor returned without calling proceed")
     call.finishCall(scOk, "", ctx.trailers)
   except CancelledError:
     discard     # the call is over for the client; the stream is already closed
@@ -308,6 +357,14 @@ proc setErrorHook*(s: AsyncGrpcServer; hook: ErrorHook) =
   ## Without a hook nothing is logged. Set it before `start`.
   doAssert s.h2 == nil, "the error hook must be set before start"
   s.errorHook = hook
+
+proc addInterceptor*(s: AsyncGrpcServer; interceptor: AsyncServerInterceptor) =
+  ## `interceptor` runs around every call to a registered method; a call to an unknown method
+  ## does not reach it. The first one added is the outermost. When the call is over for the
+  ## client, the interceptor is cancelled with the handler. Add interceptors before `start`.
+  doAssert s.h2 == nil, "interceptors must be added before start"
+  doAssert interceptor != nil, "the interceptor is nil"
+  s.interceptors.add interceptor
 
 proc start*(s: AsyncGrpcServer) =
   ## Starts listening; calls are served while the event loop runs.

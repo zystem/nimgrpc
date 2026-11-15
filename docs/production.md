@@ -44,7 +44,8 @@ measured in a large deployment ([security-requirements.md](security-requirements
 
 - [ ] The library has no authentication or authorization of calls. Check a token or a name
       from `ctx.metadata` in each handler and answer `scUnauthenticated` or
-      `scPermissionDenied`.
+      `scPermissionDenied`, or do it once for every method in a server interceptor
+      ([interceptors.md](interceptors.md)); it sees the metadata only, not the client's certificate.
 - [ ] Reflection tells anyone who can connect the names and types of the services. Register
       it only where that is wanted.
 - [ ] Handlers raise `GrpcError` with a text meant for the client. Other exceptions become
@@ -77,7 +78,9 @@ Set by default, check that they suit you:
 - [ ] `srv.setErrorHook(hook)` before `start`: without it an exception in a handler leaves no
       trace anywhere. Send what the hook gets to your log; it may hold paths and queries, so
       treat that log as sensitive.
-- [ ] The library has no metrics and no access log. Count calls and time them in the handlers.
+- [ ] The library has no metrics and no access log. Count calls and time them in the handlers, or in
+      a server interceptor, which sees every call, the health and reflection services too
+      ([interceptors.md](interceptors.md)).
 - [ ] The health service (`nimgrpc/health`) for the probes of the platform; `h.setStatus` when
       a dependency of a service is down.
 
