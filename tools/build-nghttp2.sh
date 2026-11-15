@@ -18,9 +18,10 @@ curl -fsSLO "https://github.com/nghttp2/nghttp2/releases/download/v$VERSION/$tar
 echo "$SHA256  $tarball" | sha256sum -c - >/dev/null || { echo "$tarball: wrong checksum" >&2; exit 1; }
 tar xf "$tarball"
 cd "nghttp2-$VERSION"
-cmake -S . -B build -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF \
-  -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX="$prefix" >/dev/null
-cmake --build build -j >/dev/null
-cmake --install build >/dev/null
+# cmake's output is kept in a file and shown only when a step fails
+{ cmake -S . -B build -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF \
+    -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX="$prefix" &&
+  cmake --build build -j && cmake --install build; } >"$work/build.log" 2>&1 ||
+  { cat "$work/build.log" >&2; echo "building nghttp2 $VERSION failed" >&2; exit 1; }
 echo "nghttp2 $VERSION installed in $prefix"

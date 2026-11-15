@@ -4,8 +4,8 @@ A tutorial: one path, and after each command what it prints. It starts where
 [Try it](../README.md#try-it) of the README ends: the repository is cloned, `nimble install -y
 --depsOnly` has run and `tools/build-nghttp2.sh` has built nghttp2 into `deps/nghttp2`. Run every
 command from the root of the repository. The compiler prints nothing here when it succeeds
-(`examples/config.nims` turns its hints off), and the first build of each program takes about
-half a minute.
+(`examples/config.nims` turns its hints off); the first build of a program takes from a few
+seconds (hello) to about half a minute (the chronos one).
 
 Each step is checked by `tests/texamples.nim`: it runs the programs and compares what they print
 with the blocks below.
