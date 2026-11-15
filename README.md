@@ -2,18 +2,125 @@
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16176/badge)](https://www.bestpractices.dev/projects/16176)
 
-gRPC for Nim on top of [nghttp2](https://nghttp2.org).
+nimgrpc is a gRPC library for Nim: a Nim program uses it to call and to serve gRPC methods
+(unary and streaming, over plaintext HTTP/2, TLS or mutual TLS) and so to talk to gRPC programs
+written in any other language. It is built on [nghttp2](https://nghttp2.org) and BearSSL.
 
-**Status:** early. Unary and streaming calls (client-, server- and
-bidirectional) work, client and server, over plaintext HTTP/2, TLS and mutual
-TLS, with optional gzip message compression, keepalive, graceful shutdown and
-reconnecting channels, through a blocking API or on
-[chronos](https://github.com/status-im/nim-chronos) ([docs/async.md](docs/async.md)).
-18 interop cases pass against
-grpc-go in both directions in each mode
-([docs/interop.md](docs/interop.md)), with the Nim side written against code
-generated from the official interop protos. The HTTP/2 layer passes 135 of 146
-h2spec tests ([docs/h2spec.md](docs/h2spec.md)).
+## When to use it, and when not
+
+Use it when:
+
+- a Nim program must be a gRPC client or server, with code generated from `.proto` files or on
+  raw message bytes;
+- you want threads and blocking calls, or one thread with
+  [chronos](https://github.com/status-im/nim-chronos): both have the same calls;
+- the binary must be small or fully static ([Footprint](#footprint)).
+
+Do not use it when you need:
+
+- TLS 1.3: BearSSL has TLS 1.2 only;
+- interceptors, client-side load balancing, xDS, gRPC-Web, or retries of calls the server has
+  already started: none of these exist here ([docs/roadmap.md](docs/roadmap.md));
+- a platform other than Linux: the tests run on Linux x86-64 only, and nothing else has been run;
+- a stable API: the version is 0.x, and a second number may change behaviour
+  ([docs/upgrading.md](docs/upgrading.md)).
+
+## The parts
+
+```mermaid
+flowchart TD
+  proto[".proto files"] -->|protoc-gen-nim| gen["generated messages,<br/>clients and handler sets"]
+  app["your program"] --> gen
+  app -->|raw bytes| grpc
+  gen --> grpc["gRPC layer: message framing, status,<br/>deadlines, metadata, gzip"]
+  grpc --> blocking["blocking adapter<br/>(threads)"]
+  grpc --> chronos["chronos adapter<br/>(one thread, futures)"]
+  blocking --> h2["HTTP/2 session (nghttp2)"]
+  chronos --> h2
+  blocking --> tls["TLS 1.2 (BearSSL)"]
+  chronos --> tls
+```
+
+Your program calls the generated code or the gRPC layer directly. An adapter owns the sockets;
+the HTTP/2 session and TLS below it never touch one ([Design](#design)).
+
+## Try it
+
+A server and a client in one process, with no `.proto` file and no generated code. You need
+Nim 2.2.12 or later with nimble, git, a C compiler, cmake, curl and the zlib headers
+(`zlib1g-dev` on Debian and Ubuntu). Nothing is installed outside the clone except the two
+nimble packages.
+
+```console
+$ git clone https://github.com/zystem/nimgrpc && cd nimgrpc
+$ nimble install -y --depsOnly
+$ tools/build-nghttp2.sh
+nghttp2 1.68.1 installed in /home/you/nimgrpc/deps/nghttp2
+$ nim c -r examples/hello.nim
+server started
+reply: Hello, Nim
+error: scInvalidArgument: empty name
+server stopped
+```
+
+The output of `git clone` and `nimble install` is left out (nimble downloads bearssl, chronos
+and what they need). `tools/build-nghttp2.sh` downloads nghttp2, checks its SHA-256 and builds it
+into `deps/nghttp2`. Run on 2026-11-15 in a fresh clone (Linux Mint 22.3, x86-64, Nim 2.4.0): the
+three steps took 16, 8 and 3 seconds.
+
+**Next:** [examples/README.md](examples/README.md) goes on with a service generated from a
+`.proto` file, a server and a client in two terminals, streaming, and the same on chronos.
+
+## Installing
+
+| Way | Use it for | How |
+|---|---|---|
+| A clone and `tools/build-nghttp2.sh` | trying it, the examples, the tests, work on the library | [Try it](#try-it), [docs/building.md](docs/building.md) |
+| `nimble install nimgrpc`, nghttp2 built into `/opt/nghttp2` | a program that uses the library | [Building](#building) |
+| The same with `-d:nghttp2Prefix=/path` | the same, when `/opt` is not yours | [Building](#building) |
+| A static build with musl | production: one binary that needs nothing on the host | [docs/static-build.md](docs/static-build.md) |
+| Without nimble (`NIM_BEARSSL`, `NIM_PATHS`) | a build machine with no network | [Building](#building) |
+
+nghttp2 is always built from source and linked statically: the library needs 1.61.0 or later, and
+distributions often ship an older one.
+
+## Words used here
+
+- **Unary call**: one request message, one response message.
+- **Streaming call**: the client, the server or both send a sequence of messages on one call.
+- **Channel**: a client's connection to one server; it redials when the connection is lost.
+- **Handler**: the procedure a server runs for one call.
+- **Metadata**: the key and value pairs sent with a call; **trailers** are the ones the server
+  sends at the end.
+- **Status**: how a call ended: a code (`scOk`, `scNotFound`, ...) and a message. A call that did
+  not end with OK raises `GrpcError` on the client.
+- **Deadline**: the time a client gives a call (`timeoutMs`); past it the call ends with
+  DEADLINE_EXCEEDED on both sides.
+- **Adapter**: the part that owns the sockets. The blocking adapter uses threads, the chronos
+  adapter futures on one thread.
+- **h2c**: HTTP/2 without TLS. **ALPN**: the TLS extension in which both sides agree on `h2`.
+  **mTLS**: TLS where the client shows a certificate too.
+- **GOAWAY**: the HTTP/2 frame with which a side says it takes no new calls on a connection.
+- **Health service**, **reflection**: two standard gRPC services, one answers "is this server
+  serving", the other lets tools such as grpcurl list a server's methods.
+
+## Documents
+
+[docs/README.md](docs/README.md) lists every page and says what kind it is.
+
+- **To learn it**: [examples/README.md](examples/README.md) (tutorial), [Using the library](#using-the-library) below,
+  [docs/async.md](docs/async.md) (chronos).
+- **To know how it works and what it promises**: [docs/architecture.md](docs/architecture.md),
+  [docs/threat-model.md](docs/threat-model.md), [docs/security-requirements.md](docs/security-requirements.md),
+  [docs/interop.md](docs/interop.md), [docs/h2spec.md](docs/h2spec.md).
+- **To install and build**: [docs/building.md](docs/building.md), [docs/static-build.md](docs/static-build.md).
+- **To fix something**: [docs/upgrading.md](docs/upgrading.md) (what changed in each version),
+  [docs/nim-compiler-notes.md](docs/nim-compiler-notes.md), [CHANGELOG.md](CHANGELOG.md),
+  [SECURITY.md](SECURITY.md) (reporting a vulnerability).
+- **To contribute**: [CONTRIBUTING.md](CONTRIBUTING.md), [docs/releasing.md](docs/releasing.md),
+  [GOVERNANCE.md](GOVERNANCE.md).
+
+## Using the library
 
 ### Code generation
 
@@ -111,11 +218,11 @@ queued per connection (16 MiB). On a server that faces untrusted clients set
 `maxCallMs` (the longest a call may last); see the "slow or stalled peer" row of
 [docs/threat-model.md](docs/threat-model.md) for what each one bounds.
 
-Health checking: `import nimgrpc/health`, then `let health = newHealth(); srv.register(health)`
+Health checking: `import nimgrpc/health`, then `let h = newHealth(); srv.register(h)`
 adds the standard `grpc.health.v1.Health` service (`Check`, `Watch`, `List`) to a blocking or a
 chronos server, which is what the native `grpc` probe of Kubernetes, Envoy and
-`grpc_health_probe` call. The server as a whole (name "") is SERVING; `health.setStatus(name,
-hsNotServing)` sets a service; `health.shutdown()` makes everything NOT_SERVING before `stop`.
+`grpc_health_probe` call. The server as a whole (name "") is SERVING; `h.setStatus(name,
+hsNotServing)` sets a service; `h.shutdown()` makes everything NOT_SERVING before `stop`.
 The other side is `import nimgrpc/healthclient`: `ch.checkHealth(service)`, `ch.isServing()`,
 `ch.waitServing(timeoutMs = 10_000)` and `ch.watchHealth()` on a blocking or a chronos channel.
 
@@ -189,6 +296,19 @@ waitFor main()
 When a call ends early (client cancel, deadline, lost connection, server
 stop) its handler future is cancelled, so whatever the handler awaits stops
 right away.
+
+## Status
+
+Early. Unary and streaming calls (client-, server- and
+bidirectional) work, client and server, over plaintext HTTP/2, TLS and mutual
+TLS, with optional gzip message compression, keepalive, graceful shutdown and
+reconnecting channels, through a blocking API or on
+[chronos](https://github.com/status-im/nim-chronos) ([docs/async.md](docs/async.md)).
+18 interop cases pass against
+grpc-go in both directions in each mode
+([docs/interop.md](docs/interop.md)), with the Nim side written against code
+generated from the official interop protos. The HTTP/2 layer passes 135 of 146
+h2spec tests ([docs/h2spec.md](docs/h2spec.md)).
 
 ## Design
 

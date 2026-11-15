@@ -17,7 +17,7 @@ cmake --build build -j && cmake --install build
 cd .. && nimble test
 ```
 
-A different prefix is passed with `-d:nghttp2Prefix=/path`. The README has the variant without nimble (`NIM_BEARSSL`, `NIM_PATHS`) and the footprint figures; a static musl build is in [static-build.md](static-build.md).
+`tools/build-nghttp2.sh` does the nghttp2 part without root: it downloads the same version, checks its SHA-256 and installs it into `deps/nghttp2` of the clone (or into the directory given as its argument), where the repository's `config.nims` finds it; `NGHTTP2_PREFIX=/path` in the environment does the same for another directory. Both apply only to builds inside this repository. A different prefix is passed with `-d:nghttp2Prefix=/path`, which wins over both. The README has the variant without nimble (`NIM_BEARSSL`, `NIM_PATHS`) and the footprint figures; a static musl build is in [static-build.md](static-build.md).
 
 ## Tests
 

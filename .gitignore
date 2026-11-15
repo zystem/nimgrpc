@@ -21,3 +21,13 @@ nimcache/
 !/tests/interop/*.sh
 !/tests/interop/goreflect/
 /conformance-out/
+/deps/
+# compiled examples
+/examples/*
+!/examples/*.nim
+!/examples/*.nims
+!/examples/*.md
+!/examples/greeter/
+/examples/greeter/*
+!/examples/greeter/*.nim
+!/examples/greeter/*.proto

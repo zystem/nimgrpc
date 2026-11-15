@@ -2,8 +2,18 @@
 
 ## Unreleased
 
+### Added
+- Examples: `examples/hello.nim` (a server and a client in one process, no generated code), `examples/greeter/` (a service from `hello.proto` through generated code: a server with health and reflection, a client, and both on chronos), and [examples/README.md](examples/README.md), a tutorial with what every command prints.
+- `tools/build-nghttp2.sh`: downloads nghttp2 1.68.1, checks its SHA-256 and builds it into `deps/nghttp2` of the clone, without root. Builds inside the repository find it there, or where `NGHTTP2_PREFIX` points; `-d:nghttp2Prefix` on the command line still wins. A program that uses the installed library is not affected.
+- `tests/texamples.nim`: builds and runs every `nim c -r examples/...` shown in `README.md` and `examples/README.md` and compares the output with the document; where `protoc` is installed it also checks that `hello_pb.nim` is what the plugin generates.
+- [docs/README.md](docs/README.md): an index of the documents with the kind of each page.
+
 ### Changed
+- README: starts with what the library is, when to use it and when not, a picture of the parts, a first run with its output, a table of ways to install, a glossary and the documents by purpose; the description of the API follows unchanged, the status went below it.
 - Encoder (`nimgrpc/protobuf`, used by generated code): a `bytes` or `string` field of 64 KiB or more is copied once into a buffer of the size of the message. Before, the buffer was reallocated when the field went in and again when the length in front of it needed more than one byte, so a message with one 4 MiB field cost about 10 MiB while it was encoded. The wire form is the same and generated code does not have to be regenerated. This was the library's part of the pentest's finding 4 (responses a client asks for and never reads): 200 such calls asking for 4 MB responses held 2.53 GB before and 1.76 GB after (measured locally on 2026-11-15, blocking server, release build). What is left is the handler's own message and one encoded copy per waiting handler; [docs/threat-model.md](docs/threat-model.md) says how to bound it. Tests: `tests/tcodec.nim` (suite "large values").
+
+### Fixed
+- README: the health snippet `let health = newHealth()` does not compile beside `import nimgrpc/health` (the name is the module's); it is `let h = newHealth()`.
 
 ## 0.5.0 — 2026-11-15
 
