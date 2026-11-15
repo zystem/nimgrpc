@@ -14,7 +14,8 @@ const tests = ["tests/th2session.nim", "tests/tblocking.nim", "tests/tgrpc.nim",
                "tests/tlimits.nim", "tests/tasynclimits.nim", "tests/tchannelclose.nim", "tests/tipv6.nim",
                "tests/thandshake.nim", "tests/tconnage.nim", "tests/tconnageasync.nim",
                "tests/thealth.nim", "tests/thealthclient.nim", "tests/treflection.nim",
-               "tests/tretry.nim", "tests/teyeballs.nim", "tests/thostile.nim"]
+               "tests/tretry.nim", "tests/teyeballs.nim", "tests/thostile.nim",
+               "tests/texamples.nim"]
 
 proc runAll(flags, tag: string) =
   # A separate nimcache per flag set: Nim reuses C objects across --passC changes.
@@ -44,6 +45,8 @@ task lint, "Style (NEP-1) and warnings: nothing may be reported":
   for t in ["asyncbench", "asyncload", "fuzz", "h2specasync", "h2specserver",
             "hsbench", "tlsbench"]:
     files.add "tools/" & t & ".nim"
+  for e in ["hello", "greeter/server", "greeter/client", "greeter/async"]:
+    files.add "examples/" & e & ".nim"
   var bad = 0
   for f in files:
     let (output, code) = gorgeEx("nim check --hints:off --warnings:on " &

@@ -2,6 +2,13 @@ import std/strutils
 switch("path", thisDir() & "/src")
 switch("mm", "orc")
 switch("panics", "on")
+# nghttp2: the library looks in /opt/nghttp2 unless -d:nghttp2Prefix says otherwise. Inside this
+# repository NGHTTP2_PREFIX, or a build made by tools/build-nghttp2.sh (deps/nghttp2), is used
+# when the command line names none.
+if existsEnv("NGHTTP2_PREFIX"):
+  switch("define", "nghttp2Prefix=" & getEnv("NGHTTP2_PREFIX"))
+elif dirExists(thisDir() & "/deps/nghttp2"):
+  switch("define", "nghttp2Prefix=" & thisDir() & "/deps/nghttp2")
 # Dependencies outside nimble's reach (e.g. a sandbox): point at checkouts.
 if existsEnv("NIM_BEARSSL"): switch("path", getEnv("NIM_BEARSSL"))
 # Extra checkouts (chronos and its deps), separated by ':'.
