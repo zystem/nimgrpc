@@ -37,3 +37,9 @@ artefact:
 
 Still to do: rerun with a server that delays its replies, so the timing
 artefact in 5.1.1 drops out.
+
+## In CI
+
+`tools/conformance.sh` runs h2spec against both adapters in the workflow `Hostile client` (weekly, and when its files change) and fails on a failure that is not one of those above (`tools/h2spec_check.py`). It also asks both servers for their services with grpcurl, a client of server reflection that this project did not write.
+
+The first run there (2026-11-15, nimgrpc 0.4.0, GitHub's runner): **146 tests, 135 passed, 1 skipped, 10 failed** on each adapter. The blocking adapter failed the nine tests of the first table and one more, 6.1 "Sends a DATA frame on the stream that is not in open or half-closed (local) state" (got: DATA). It is the same race as 5.1 "half closed (remote): HEADERS" of the chronos adapter: the test server's answer left before the stray frame arrived, and h2spec looks only at the first frame. Both races are in the known list for both adapters; a run where one of them passes says so.

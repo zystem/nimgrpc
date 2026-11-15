@@ -1,0 +1,73 @@
+name: Hostile client
+
+# What a peer that means harm sends to a server, and what other people's tools say about it,
+# once a week and when these files change:
+# - tools/hostile.sh: floods, bombs and calls that are opened and left (tools/hostile.py), against
+#   the blocking and the chronos server; a server that dies, stops answering or grows fails it.
+# - tools/conformance.sh: h2spec against both HTTP/2 adapters (new failures fail it; the known
+#   ones are in docs/h2spec.md) and grpcurl against server reflection.
+# A failure of the weekly run opens an issue; it does not block merges.
+on:
+  schedule:
+    - cron: "29 2 * * 3"
+  workflow_dispatch:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "tools/hostile*"
+      - "tools/conformance.sh"
+      - "tools/h2spec*"
+      - ".github/workflows/hostile.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  hostile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Hostile client
+        id: hostile
+        run: tools/hostile.sh 2>&1 | tee hostile.txt; exit "${PIPESTATUS[0]}"
+      - name: h2spec and grpcurl (built from source; the Go checksum database verifies the modules)
+        if: always()
+        run: |
+          # h2spec 2.6.0 cannot be installed with `go install` (its module path has no /v2):
+          # built from its repository at the commit of the tag
+          git init -q /tmp/h2spec-src
+          git -C /tmp/h2spec-src fetch -q --depth 1 https://github.com/summerwind/h2spec 70ac2294010887f48b18e2d64f5cccd48421fad1
+          git -C /tmp/h2spec-src checkout -q FETCH_HEAD
+          (cd /tmp/h2spec-src && go build -o "$(go env GOPATH)/bin/h2spec" ./cmd/h2spec)
+          go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.3
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Conformance
+        id: conformance
+        if: always()
+        run: tools/conformance.sh 2>&1 | tee conformance.txt; exit "${PIPESTATUS[0]}"
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hostile-reports
+          path: |
+            hostile.txt
+            conformance.txt
+            conformance-out/
+          retention-days: 30
+      - name: Open an issue on a failure of the weekly run
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body="The weekly hostile-client run failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (reports in the artifact hostile-reports)"$'\n\n```\n'"$(tail -n 20 hostile.txt; tail -n 20 conformance.txt)"$'\n```'
+          gh issue create --title "Hostile client or conformance failure" --body "$body"

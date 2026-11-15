@@ -24,7 +24,7 @@ Tools: AddressSanitizer and LeakSanitizer on every push and pull request (`nimbl
 
 Fuzzing: `tools/fuzz.nim` feeds mutated valid inputs to the parsers that face the network (gRPC framing, gzip, Protobuf for three message types, the HTTP/2 session) under AddressSanitizer, weekly (`.github/workflows/fuzz.yml`); a crash or hang uploads the input and opens an issue, and is fixed with a regression test. It is not coverage-guided; a libFuzzer or ClusterFuzzLite harness is on the roadmap. ThreadSanitizer runs the whole suite every night (`tsan.yml`).
 
-Long-running checks: the weekly soak test (`.github/workflows/soak.yml`, `tools/soak.sh`) runs the chronos server under connection churn for 15 minutes, plain and TLS, and fails on growth of resident memory or open descriptors; an issue is opened on a breach.
+Long-running checks: the weekly soak test (`.github/workflows/soak.yml`, `tools/soak.sh`) runs the chronos server under connection churn for 15 minutes, plain and TLS, and fails on growth of resident memory or open descriptors; an issue is opened on a breach. The weekly hostile-client run (`.github/workflows/hostile.yml`, `tools/hostile.sh`, `tools/conformance.sh`) sends both servers the floods, bombs and abandoned calls of the pentest of 2026-11-14 and runs h2spec and grpcurl; a failure opens an issue.
 
 Threshold: a sanitizer report of any severity is fixed before the change is merged; a test that exposes it is added. CI fails on a report.
 
