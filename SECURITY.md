@@ -18,7 +18,7 @@ nimgrpc parses bytes from the network (HTTP/2, TLS, gRPC framing, Protobuf), so 
 ## What is supported
 
 - **Scope**: the latest release (all fixes of security problems are made there) and the head of `main`. An earlier release does not get a fix: update to the latest.
-- **Duration**: a release is supported until the next release is made. The project is young (version 0.0.x) and has no long-term-support line.
+- **Duration**: a release is supported until the next release is made. The project is young (version 0.x) and has no long-term-support line ([docs/supported-versions.md](docs/supported-versions.md)).
 - **End of support**: it is said in the release notes of the release that replaces it.
 
 The threat model is in [docs/threat-model.md](docs/threat-model.md), the policies for dependencies and analysis in [docs/security-policies.md](docs/security-policies.md), how the project is run in [GOVERNANCE.md](GOVERNANCE.md).

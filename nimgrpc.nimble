@@ -15,7 +15,7 @@ const tests = ["tests/th2session.nim", "tests/tblocking.nim", "tests/tgrpc.nim",
                "tests/thandshake.nim", "tests/tconnage.nim", "tests/tconnageasync.nim",
                "tests/thealth.nim", "tests/thealthclient.nim", "tests/treflection.nim",
                "tests/tretry.nim", "tests/teyeballs.nim", "tests/thostile.nim",
-               "tests/texamples.nim"]
+               "tests/texamples.nim", "tests/tdocs.nim"]
 
 proc runAll(flags, tag: string) =
   # A separate nimcache per flag set: Nim reuses C objects across --passC changes.

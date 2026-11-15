@@ -114,7 +114,10 @@ distributions often ship an older one.
   [docs/threat-model.md](docs/threat-model.md), [docs/security-requirements.md](docs/security-requirements.md),
   [docs/interop.md](docs/interop.md), [docs/h2spec.md](docs/h2spec.md).
 - **To install and build**: [docs/building.md](docs/building.md), [docs/static-build.md](docs/static-build.md).
-- **To fix something**: [docs/upgrading.md](docs/upgrading.md) (what changed in each version),
+- **To run it for real**: [docs/production.md](docs/production.md) (a checklist),
+  [docs/supported-versions.md](docs/supported-versions.md).
+- **To fix something**: [docs/troubleshooting.md](docs/troubleshooting.md) (by message), [docs/faq.md](docs/faq.md),
+  [docs/upgrading.md](docs/upgrading.md) (what changed in each version),
   [docs/nim-compiler-notes.md](docs/nim-compiler-notes.md), [CHANGELOG.md](CHANGELOG.md),
   [SECURITY.md](SECURITY.md) (reporting a vulnerability).
 - **To contribute**: [CONTRIBUTING.md](CONTRIBUTING.md), [docs/releasing.md](docs/releasing.md),

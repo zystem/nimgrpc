@@ -78,6 +78,21 @@ suite "the blocking server and calls left without a message":
     ch.close()
     srv.stop()
 
+  test "a request far over the limit is refused at once, not at the client's deadline":
+    # The server answers when the limit is passed and reads no more; unless it also resets the
+    # stream the client waits for a window that never opens (seen with 6 MB and more).
+    let srv = newGrpcServer()
+    srv.addUnary("/t.T/Echo", echoUnary)
+    srv.start()
+    let ch = bc.dial("127.0.0.1", srv.port)
+    let began = getMonoTime()
+    check codeOf(proc () = discard bc.unaryCall(ch, "/t.T/Echo", newSeq[byte](20 * 1024 * 1024),
+                                                timeoutMs = 20_000)) == scResourceExhausted
+    check (getMonoTime() - began).inMilliseconds < 10_000
+    check bc.unaryCall(ch, "/t.T/Echo", @[7'u8], timeoutMs = 3000).message == @[7'u8]
+    ch.close()
+    srv.stop()
+
 suite "Limits.maxCallMs":
   test "blocking: a streaming call that goes quiet is reset (the client sees CANCELLED)":
     let srv = newGrpcServer(limits = Limits(maxCallMs: 300))

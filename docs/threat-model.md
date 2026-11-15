@@ -24,7 +24,7 @@ nimgrpc is a library: it runs inside the program of its user, as a gRPC client, 
 
 ## Out of scope
 
-Authentication and authorization of calls beyond TLS and metadata: the library gives handlers the peer certificate and the metadata, and the program decides. Rate limiting per client. Protection from a compromised host.
+Authentication and authorization of calls beyond TLS and metadata: the library gives handlers the metadata, and the program decides. With mutual TLS only clients with a certificate of the given CA connect, but a handler is not told which certificate it was. Rate limiting per client. Protection from a compromised host.
 
 ## Attack surface
 
