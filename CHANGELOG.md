@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.1 — 2026-11-15
+
 ### Added
 - Examples: `examples/hello.nim` (a server and a client in one process, no generated code), `examples/greeter/` (a service from `hello.proto` through generated code: a server with health and reflection, a client, and both on chronos), and [examples/README.md](examples/README.md), a tutorial with what every command prints.
 - `tools/build-nghttp2.sh`: downloads nghttp2 1.68.1, checks its SHA-256 and builds it into `deps/nghttp2` of the clone, without root. Builds inside the repository find it there, or where `NGHTTP2_PREFIX` points; `-d:nghttp2Prefix` on the command line still wins. A program that uses the installed library is not affected.

@@ -4,6 +4,12 @@ The latest release is supported ([SECURITY.md](../SECURITY.md)). Read the notes 
 
 General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new commit); rebuild nghttp2 if [building.md](building.md) names a new version; regenerate the code of your `.proto` files with the new `protoc-gen-nim` (generated code and the library are versioned together); run your tests.
 
+## 0.5.1
+
+- **Upgrade from 0.4.0 or 0.5.0 if a blocking server can get a unary request much larger than `maxMessage`**: such a client waited until its deadline (for ever without one) instead of getting RESOURCE_EXHAUSTED at once. Nothing to change in your code.
+- **Large `bytes` and `string` fields** are encoded with one copy less. The wire form is the same; generated code does not have to be regenerated for this.
+- Nothing else changes in behaviour. New documents: [troubleshooting.md](troubleshooting.md), [faq.md](faq.md), [production.md](production.md), [supported-versions.md](supported-versions.md), and the examples in [../examples/README.md](../examples/README.md).
+
 ## 0.5.0
 
 - **nghttp2 1.68.1**: rebuild nghttp2 at 1.68.1 ([building.md](building.md)); it fixes CVE-2026-27135. The library still compiles against 1.61.0 or later.
