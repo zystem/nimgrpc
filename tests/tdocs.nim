@@ -107,6 +107,14 @@ proc call(port: int; path = "/t.T/Echo"; tls: TlsConfig = nil; name = "";
     discard ch.unaryCall(path, req, timeoutMs = timeoutMs, compression = compression)
   if dialed: ch.close()
 
+proc showsClosed(got: string) =
+  ## The peer closed the connection: which of the two texts a client gets depends on whether
+  ## it was reading or writing at that moment (the second was seen in CI under AddressSanitizer).
+  checkpoint got
+  check got.startsWith("scUnavailable")
+  check "connection closed by peer" in got or "write error" in got
+  check "connection closed by peer" in page and "`write error` when this side was sending" in page
+
 proc freePort(): int =
   let s = newSocket()
   s.bindAddr(Port(0), "127.0.0.1")
@@ -146,18 +154,18 @@ suite "troubleshooting page":
     shows(call(plain.port, req = newSeq[byte](5 * 1024 * 1024)), "scResourceExhausted", "exceeds the limit of")
     shows(call(plain.port, "/t.T/Large"), "scResourceExhausted", "exceeds the limit of")
     shows(call(plain.port, compression = "br"), "scInvalidArgument", "unsupported compression \"")
-    shows(call(tlsOnly.port), "scUnavailable", "connection closed by peer")
+    showsClosed(call(tlsOnly.port))
     shows(call(plain.port, tls = ca, name = "localhost"), "scUnavailable",
           "TLS: unsupported protocol version (TLS 1.2 is required)")
     shows(call(tlsOnly.port, tls = tlsClientConfig(pem"otherca.pem"), name = "localhost"),
           "scUnavailable", "TLS: certificate not signed by a trusted CA")
     shows(call(tlsOnly.port, tls = ca, name = "example.com"), "scUnavailable",
           "TLS: server name does not match the certificate")
-    shows(call(mutual.port, tls = ca, name = "localhost"), "scUnavailable", "connection closed by peer")
+    showsClosed(call(mutual.port, tls = ca, name = "localhost"))
 
     let first = dial("127.0.0.1", single.port)
     discard first.unaryCall("/t.T/Echo", @[1'u8], timeoutMs = 5000)
-    shows(call(single.port), "scUnavailable", "connection closed by peer")
+    showsClosed(call(single.port))
     first.shutdown()     # not `close`: that frees the channel, which may not be used after it
     let afterShutdown = failure:
       discard first.unaryCall("/t.T/Echo", @[1'u8])
