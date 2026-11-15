@@ -5,7 +5,7 @@
 ## protoc is available (PROTOC, default `protoc` on PATH) the re-encoded bytes
 ## must also decode, in protoc, to the same text as the original.
 
-import std/[unittest, os, osproc, options, tables, math, sequtils]
+import std/[unittest, os, osproc, options, tables, math, sequtils, strutils]
 import nimgrpc/[protobuf, bytebuf, wire, status, health]
 import ./gen/[codec_pb, legacy_pb]
 
@@ -153,6 +153,36 @@ suite "proto3 codec":
     w.putTag(1001, wt32); w.putFixed32(1)
     w.putTag(19, wtVarint); w.putVarint(5)
     check Everything.decode(w.buf).`type` == 5
+
+suite "large values":
+  # A large bytes or string field is copied once into a buffer that is as long as the message
+  # (it used to be reallocated twice, and one 4 MiB field cost 10 MiB).
+  test "a large bytes field in a sub-message: one buffer of the size of the message":
+    var m = Everything(scalars: Scalars(fBytes: newSeq[byte](1 shl 20)), hasScalars: true)
+    m.scalars.fBytes[^1] = 7
+    let enc = encode(m)
+    check enc.len > 1 shl 20 and enc.len < (1 shl 20) + 32
+    check enc.capacity <= enc.len + 80
+    let back = Everything.decode(enc)
+    check back.scalars.fBytes.len == 1 shl 20 and back.scalars.fBytes[^1] == 7
+
+  test "a large string three messages deep":
+    var deep = new Node
+    deep.name = strutils.repeat('x', 300_000)
+    var mid = new Node
+    mid.name = "c"
+    mid.child = deep
+    let m = Everything(tree: Node(name: "root", child: mid), hasTree: true)
+    let enc = encode(m)
+    check enc.capacity <= enc.len + 80
+    check Everything.decode(enc).tree.child.child.name.len == 300_000
+
+  test "two large fields and small ones around them round-trip":
+    var m = Everything(scalars: Scalars(fString: strutils.repeat('a', 70_000), fBytes: newSeq[byte](70_000), fInt32: 5),
+                       hasScalars: true, strings: @["s", strutils.repeat('b', 100_000), "t"])
+    let back = Everything.decode(encode(m))
+    check back.scalars.fString.len == 70_000 and back.scalars.fBytes.len == 70_000
+    check back.scalars.fInt32 == 5 and back.strings.len == 3 and back.strings[1].len == 100_000
 
 suite "nesting limit":
   test "the limit is 100":
