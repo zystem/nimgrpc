@@ -4,8 +4,9 @@ The latest release is supported ([SECURITY.md](../SECURITY.md)). Read the notes 
 
 General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new commit); rebuild nghttp2 if [building.md](building.md) names a new version; regenerate the code of your `.proto` files with the new `protoc-gen-nim` (generated code and the library are versioned together); run your tests.
 
-## Unreleased
+## 0.5.0
 
+- **nghttp2 1.68.1**: rebuild nghttp2 at 1.68.1 ([building.md](building.md)); it fixes CVE-2026-27135. The library still compiles against 1.61.0 or later.
 - **ALPN is required**: a TLS client that offers no ALPN protocol is refused by the server in the handshake, and a client refuses a server that selects none. Clients of this library always offer `h2`; a tool or proxy that talks TLS to a server of this library must offer ALPN `h2` (`openssl s_client -alpn h2`).
 - **Content-type**: only `application/grpc`, `application/grpc+...` and `application/grpc;...` are gRPC. A look-alike such as `application/grpcx` gets HTTP 415 from a server, and a client call that receives one fails with UNKNOWN.
 - **Malformed `grpc-timeout`**: a call whose `grpc-timeout` is present but malformed now ends with INTERNAL ("malformed grpc-timeout"); before, it ran without a deadline. A client of this library never sends one.
