@@ -177,7 +177,7 @@ proc headersError(call: AsyncCall; hs: seq[Header]): ref GrpcError =
   call.headers = fromWire(hs)
   if httpStatus != "200":
     return call.failure(httpToStatus(httpStatus), "HTTP status " & httpStatus)
-  if not contentType.startsWith(grpcContentType):
+  if not contentType.isGrpcContentType:
     return call.failure(scUnknown, "unexpected content-type " & contentType.escape)
 
 proc statusError(call: AsyncCall; tr: seq[Header]): ref GrpcError =

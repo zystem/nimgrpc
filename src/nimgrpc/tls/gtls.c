@@ -478,6 +478,9 @@ typedef struct {
     int is_server;
     int verify_peer;               /* the peer must present a valid chain */
     gtls_conf *conf;
+    const br_ssl_server_policy_class *policy_vt;  /* server: wraps the inner policy (ALPN check) */
+    const br_ssl_server_policy_class **inner;     /* server: the policy BearSSL installed */
+    int alpn_refused;              /* server: the client offered no ALPN protocol */
     char sni[256];                 /* client: the name the session is for */
     int resumed;                   /* server: the session came out of the cache */
     int offered;                   /* client: a saved session was offered ... */
@@ -489,6 +492,33 @@ typedef struct {
 } gtls_conn;
 
 static const char *h2_name = "h2";
+
+/* A server policy that refuses a client which did not offer ALPN: BearSSL's
+ * BR_OPT_FAIL_ON_ALPN_MISMATCH only fails when the client offers protocols and none
+ * matches; a ClientHello with no ALPN extension would complete the handshake. BearSSL asks
+ * the policy on a full handshake only; a resumed one is checked by gtls_alpn once it is done. */
+static int policy_choose(const br_ssl_server_policy_class **pctx, const br_ssl_server_context *cc,
+                         br_ssl_server_choices *choices) {
+    gtls_conn *t = (gtls_conn *)((char *)pctx - offsetof(gtls_conn, policy_vt));
+    if (br_ssl_engine_get_selected_protocol((br_ssl_engine_context *)&cc->eng) == NULL) {
+        t->alpn_refused = 1;
+        return 0;                  /* handshake_failure alert */
+    }
+    return (*t->inner)->choose(t->inner, cc, choices);
+}
+static uint32_t policy_keyx(const br_ssl_server_policy_class **pctx, unsigned char *data,
+                            size_t *len) {
+    gtls_conn *t = (gtls_conn *)((char *)pctx - offsetof(gtls_conn, policy_vt));
+    return (*t->inner)->do_keyx(t->inner, data, len);
+}
+static size_t policy_sign(const br_ssl_server_policy_class **pctx, unsigned algo_id,
+                          unsigned char *data, size_t hv_len, size_t len) {
+    gtls_conn *t = (gtls_conn *)((char *)pctx - offsetof(gtls_conn, policy_vt));
+    return (*t->inner)->do_sign(t->inner, algo_id, data, hv_len, len);
+}
+static const br_ssl_server_policy_class policy_class = {
+    sizeof(br_ssl_server_policy_class *), policy_choose, policy_keyx, policy_sign
+};
 
 /* ---------------------------------------------------------- session cache
  *
@@ -753,6 +783,9 @@ gtls_conn *gtls_server_new(gtls_conf *c) {
         br_ssl_server_init_full_ec(&t->u.server, c->chain, c->chain_len,
                                    BR_KEYTYPE_EC, &c->ec);
     setup_common(t, c);
+    t->inner = t->u.server.policy_vtable;
+    t->policy_vt = &policy_class;
+    br_ssl_server_set_policy(&t->u.server, &t->policy_vt);
     t->conf = c;
     gtls_cache *k = conf_cache(c);
     if (k) br_ssl_server_set_cache(&t->u.server, &k->vt);
@@ -790,6 +823,8 @@ enum {
 };
 
 unsigned gtls_state(gtls_conn *t) { return br_ssl_engine_current_state(t->eng); }
+/* 1 if a server refused the client because it offered no ALPN protocol. */
+int gtls_alpn_refused(gtls_conn *t) { return t->alpn_refused; }
 int gtls_last_error(gtls_conn *t) { return br_ssl_engine_last_error(t->eng); }
 
 /* Records from the network. Returns bytes taken (0 if the engine wants none now). */

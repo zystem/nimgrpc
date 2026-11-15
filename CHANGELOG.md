@@ -2,10 +2,18 @@
 
 ## Unreleased
 
+### Security
+- TLS: a peer that negotiates no ALPN protocol is refused on both sides. A client that sent no ALPN extension at all (`openssl s_client -tls1_2` without `-alpn`) used to finish the handshake, because BearSSL's own check only fails when a client offers other protocols; the server now ends the handshake with an alert, and a client refuses a server that selects no protocol ("peer did not negotiate ALPN h2"). Resumed sessions are unchanged (found by a local pentest). Tests: `tests/ttls.nim`.
+- Both servers: a handler exception that is not a `GrpcError` was sent to the client as UNKNOWN with its text, which can hold file paths, queries and other internals. The client now gets `internal error`. A `GrpcError` keeps its own code and message. New `setErrorHook` (both servers, before `start`) calls a hook with the method path and the exception, so the operator can still log it; without a hook nothing is written anywhere.
+
 ### Added
 - `tools/hostile.sh` (`tools/hostile.py`, `tools/hostiletarget.nim`): a hostile client in raw HTTP/2 frames against the blocking and the chronos server: nested Protobuf groups, a wire type that does not exist, Rapid Reset, CONTINUATION, PING and SETTINGS floods, oversized headers, a 4 GB length prefix, a gzip bomb, random frames, 400 calls opened and left (unary, `Health/Watch`, streaming), 300 MB on a stream nobody reads, 500 idle connections. After each attack an ordinary call must be answered and the server must not have grown past its bound. These are the attacks of the pentest of 2026-11-14, kept so that what they found does not come back.
 - `tools/conformance.sh`: h2spec against both HTTP/2 adapters (a failure that is not one of the known ones of [docs/h2spec.md](docs/h2spec.md) fails it) and grpcurl against server reflection.
 - The workflow `Hostile client` runs both once a week and when their files change; a failure of the weekly run opens an issue.
+
+### Changed
+- Both servers and both clients: the content-type must be `application/grpc`, or that followed by `+` or `;` (`application/grpc+proto`). `application/grpcx` and other look-alikes get HTTP 415 from a server and fail a client call.
+- Both servers: a `grpc-timeout` header that is present but malformed (`-1S`, `5x`) ends the call with INTERNAL ("malformed grpc-timeout") before the handler runs; it used to mean no deadline. A call without the header still has no deadline.
 
 ## 0.4.0 — 2026-11-15
 

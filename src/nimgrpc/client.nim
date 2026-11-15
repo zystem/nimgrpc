@@ -244,7 +244,7 @@ proc readHeaders(call: var ClientCall) =
   call.headers = fromWire(hs)
   if httpStatus != "200":
     call.fail(httpToStatus(httpStatus), "HTTP status " & httpStatus)
-  if not contentType.startsWith(grpcContentType):
+  if not contentType.isGrpcContentType:
     call.fail(scUnknown, "unexpected content-type " & contentType.escape)
 
 proc finish(call: var ClientCall) =

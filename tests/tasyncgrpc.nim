@@ -5,6 +5,8 @@ import std/[unittest, strutils, typedthreads, atomics]
 import pkg/chronos
 import nimgrpc/[asyncclient, asyncserver]
 from nimgrpc/client as bc import nil
+from nimgrpc/h2/blocking as h2 import nil
+import nimgrpc/wire
 import nimgrpc/decode
 import ./gen/codec_pb
 
@@ -34,6 +36,16 @@ template expectStatus(want: StatusCode; body: untyped) =
     ck got == want
 
 var cancelledHandlers = 0
+var hookPaths, hookMsgs: seq[string]
+
+proc recordError(path: string; e: ref CatchableError) {.gcsafe, raises: [].} =
+  {.cast(gcsafe).}:
+    hookPaths.add path
+    hookMsgs.add e.msg
+
+proc hookSeen(): tuple[paths, msgs: seq[string]] {.gcsafe.} =
+  {.cast(gcsafe).}:
+    (hookPaths, hookMsgs)
 
 proc echoUnary(ctx: AsyncServerContext; req: seq[byte]): Future[seq[byte]] {.async.} =
   let s = req.toStr
@@ -92,6 +104,7 @@ proc newTestServer(): AsyncGrpcServer =
   result.addStreaming("/t.S/Refuse", refuse)
   result.addUnary("/t.S/Echo", echoUnary)
   result.addUnary("/t.S/NodeName", nodeName)
+  result.setErrorHook(recordError)
   result.addStreaming("/t.S/Counter", counter)
   result.addStreaming("/t.S/Flood", flood)
   result.start()
@@ -101,6 +114,8 @@ suite "async gRPC":
   setup:
     srv = newTestServer()
     cancelledHandlers = 0
+    hookPaths = @[]
+    hookMsgs = @[]
   teardown:
     waitFor srv.stop()
 
@@ -129,12 +144,62 @@ suite "async gRPC":
       ck code == scFailedPrecondition
       ck msg == "nope"
       ck trailers.get("x-why") == "asked"
-      expectStatus(scUnknown):
+      code = scOk
+      msg = ""
+      try:
         discard await ch.unaryCall("/t.S/Echo", "boom".toBytes)
+      except GrpcError as e:
+        code = e.code
+        msg = e.msg
+      ck code == scUnknown
+      ck msg == "internal error"          # the exception text stays on the server
+      let seen = hookSeen()
+      ck seen.paths == @["/t.S/Echo"]     # a GrpcError (above) did not reach the hook
+      ck seen.msgs == @["not a grpc error"]
       expectStatus(scUnimplemented):
         discard await ch.unaryCall("/t.S/Nope", "x".toBytes)
       await ch.close()
     run go(srv)
+
+  test "raw requests: look-alike content-types get 415, a malformed grpc-timeout is INTERNAL":
+    type Arg = tuple[port: int; res: ptr array[8, string]; done: ptr Atomic[bool]]
+    proc client(a: Arg) {.thread.} =
+     {.cast(gcsafe).}:
+      proc call(contentType: string; extra: seq[h2.Header]): string =
+        let c = h2.dial("127.0.0.1", Port(a.port))
+        var hs = @[(":method", "POST"), (":scheme", "http"), (":authority", "x"),
+                   (":path", "/t.S/Echo"), ("content-type", contentType), ("te", "trailers")]
+        hs.add extra
+        let r = h2.request(c, hs, encodeMessage("hi".toBytes), timeoutMs = 5000)
+        h2.close(c)
+        for blk in [r.headers, r.trailers]:
+          for (k, v) in blk:
+            if k == ":status" and v != "200": result.add "http " & v & " "
+            if k == "grpc-status": result.add "grpc " & v & " "
+            if k == "grpc-message": result.add v
+      try:
+        a.res[][0] = call("application/grpcx", @[])
+        a.res[][1] = call("application/grpc+proto", @[])
+        a.res[][2] = call("application/grpc", @[("grpc-timeout", "-1S")])
+        a.res[][3] = call("application/grpc", @[("grpc-timeout", "5x")])
+        a.res[][4] = call("application/grpc", @[("grpc-timeout", "5S")])
+        a.res[][5] = call("application/grpc", @[])
+      except CatchableError as e:
+        a.res[][7] = e.msg
+      a.done[].store(true)
+    var res: array[8, string]
+    var done: Atomic[bool]
+    var th: Thread[Arg]
+    createThread(th, client, (srv.port, res.addr, done.addr))
+    while not done.load: waitFor sleepAsync(5.milliseconds)
+    joinThread(th)
+    check res[7] == ""
+    check res[0] == "http 415 "
+    check res[1] == "grpc 0 "
+    check res[2] == "grpc 13 malformed grpc-timeout"
+    check res[3] == "grpc 13 malformed grpc-timeout"
+    check res[4] == "grpc 0 "
+    check res[5] == "grpc 0 "
 
   test "a request of 100 000 nested groups is INTERNAL and the server goes on":
     proc go(srv: AsyncGrpcServer) {.async.} =

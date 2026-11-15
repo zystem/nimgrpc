@@ -1,6 +1,6 @@
 ## TLS and mutual TLS.
 
-import std/[unittest, os, osproc, strutils]
+import std/[unittest, os, osproc, strutils, net]
 import nimgrpc
 import nimgrpc/tls/tls as rawtls
 import ./interop/interop
@@ -112,6 +112,63 @@ suite "TLS":
     discard expectFailure(proc () = ch.echoOnce())
     ch.close()
     srv.stop()
+
+  test "a client that offers no ALPN protocol is refused in the handshake":
+    if findExe("openssl").len == 0:
+      checkpoint "openssl is not on PATH: skipped"
+      skip()
+    else:
+      let srv = newTestServer(tls = tlsServerConfig(pem"server.pem", pem"server.key"))
+      srv.start()
+      # no -alpn: no ALPN extension at all, which BearSSL's own mismatch check lets through
+      let (output, _) = execCmdEx("echo | openssl s_client -connect 127.0.0.1:" & $srv.port.int &
+                                  " -tls1_2 2>&1")
+      check "handshake failure" in output
+      check "Cipher is (NONE)" in output
+      # the same client with ALPN h2 is served, so the refusal is about the missing protocol
+      let (ok, _) = execCmdEx("echo | openssl s_client -connect 127.0.0.1:" & $srv.port.int &
+                              " -tls1_2 -alpn h2 2>&1")
+      check "ALPN protocol: h2" in ok
+      let ch = dial("127.0.0.1", srv.port, tlsClientConfig(pem"ca.pem"), "localhost")
+      ch.echoOnce()
+      ch.close()
+      srv.stop()
+
+  test "a server that selects no ALPN protocol is refused by the client":
+    if findExe("openssl").len == 0:
+      checkpoint "openssl is not on PATH: skipped"
+      skip()
+    else:
+      var port: Port
+      block:
+        let probe = newSocket()
+        probe.bindAddr(Port(0), "127.0.0.1")
+        port = probe.getLocalAddr()[1]
+        probe.close()
+      # s_server without -alpn answers no protocol
+      let p = startProcess(findExe("openssl"),
+        args = ["s_server", "-accept", $port.int, "-cert", certs / "server.pem",
+                "-key", certs / "server.key", "-tls1_2", "-quiet"],
+        options = {poStdErrToStdOut})
+      var up = false
+      for _ in 0 ..< 100:
+        let s = newSocket()
+        try:
+          s.connect("127.0.0.1", port)
+          up = true
+        except OSError:
+          sleep(50)
+        s.close()
+        if up: break
+      check up
+      if up:
+        let ch = dial("127.0.0.1", port.int, tlsClientConfig(pem"ca.pem"), "localhost")
+        let msg = expectFailure(proc () = ch.echoOnce())
+        check "ALPN" in msg
+        ch.close()
+      p.terminate()
+      discard p.waitForExit()
+      p.close()
 
   test "bad PEM is reported when the config is built":
     expect TlsError:

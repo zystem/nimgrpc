@@ -53,7 +53,9 @@ srv.addStreaming("/demo.Chat/Talk", echo)
 ```
 
 A handler ends the call by completing (OK) or by failing with GrpcError;
-any other error becomes UNKNOWN. `ctx.headers`, `ctx.trailers`,
+any other error becomes UNKNOWN with the message `internal error` (the text
+of the error is not sent to the client; `srv.setErrorHook(hook)`, set before
+`start`, receives the method path and the error). `ctx.headers`, `ctx.trailers`,
 `ctx.responseCompression`, `ctx.metadata` and `ctx.timeoutMs` work as in the
 blocking server.
 

@@ -10,7 +10,9 @@
 ##   bidirectional streaming.
 ##
 ## A handler ends the call by returning (status OK) or by raising GrpcError
-## (any other status). Any other CatchableError becomes UNKNOWN.
+## (any other status). Any other CatchableError becomes UNKNOWN with the fixed
+## message "internal error": the exception text may hold paths or queries and is
+## not sent to the client. `setErrorHook` gives the operator the real exception.
 
 import std/[tables, strutils, algorithm]
 import ./status, ./wire, ./h2/blocking, ./compress/gzip
@@ -65,10 +67,15 @@ type
     of mkUnary: unary: RawUnaryHandler
     of mkStreaming: streaming: RawStreamingHandler
 
+  ErrorHook* = proc (path: string; e: ref CatchableError) {.nimcall, gcsafe, raises: [].}
+    ## Called, on the worker thread, with the method path and the exception of
+    ## a handler that failed with anything but a GrpcError.
+
   Registry = object
     methods: Table[string, Method]
     maxMessage: int
     maxCallMs: int           ## `Limits.maxCallMs`
+    errorHook: ErrorHook     ## read by workers without a lock: set before `start`
 
   GrpcServer* = ref object
     reg: Registry
@@ -214,13 +221,15 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
   let reg = cast[ptr Registry](userData)
   var ctx = ServerContext(timeoutMs: -1)
   var meth, contentType, encoding = ""
-  var acceptsGzip = false
+  var acceptsGzip, badTimeout = false
   for (k, v) in st.headers:
     case k
     of ":path": ctx.path = v
     of ":method": meth = v
     of "content-type": contentType = v
-    of "grpc-timeout": ctx.timeoutMs = parseTimeout(v)
+    of "grpc-timeout":
+      ctx.timeoutMs = parseTimeout(v)
+      badTimeout = ctx.timeoutMs < 0     # present but malformed: the call ends INTERNAL below
     of "grpc-encoding": encoding = v
     of "grpc-accept-encoding":
       for e in v.split(','):
@@ -230,7 +239,7 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
     if meth != "POST":
       st.sendHeaders(@[(":status", "405")], endStream = true)
       return
-    if not contentType.startsWith(grpcContentType):
+    if not contentType.isGrpcContentType:
       st.sendHeaders(@[(":status", "415")], endStream = true)
       return
   except H2Error:
@@ -247,6 +256,9 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
   if encoding.len > 0 and encoding notin supportedEncodings:
     call.finishCall(scUnimplemented, "grpc-encoding " & encoding.escape &
                     " is not supported", @[])
+    return
+  if badTimeout:
+    call.finishCall(scInternal, "malformed grpc-timeout", @[])
     return
   if ctx.path notin reg.methods:
     call.finishCall(scUnimplemented, "unknown method " & ctx.path, @[])
@@ -269,7 +281,8 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
   except GrpcError as e:
     call.finishCall(e.code, e.msg, ctx.trailers & e.trailers)
   except CatchableError as e:
-    call.finishCall(scUnknown, e.msg, ctx.trailers)
+    if reg.errorHook != nil: reg.errorHook(ctx.path, e)
+    call.finishCall(scUnknown, "internal error", ctx.trailers)
 
 proc wholeRequest(headers: openArray[Header]; userData: pointer): int
     {.nimcall, gcsafe, raises: [].} =
@@ -315,6 +328,14 @@ proc addStreamingRaw*(s: GrpcServer; path: string; handler: RawStreamingHandler;
                       userData: pointer) =
   doAssert not s.started, "methods must be registered before start"
   s.reg.methods[path] = Method(kind: mkStreaming, streaming: handler, userData: userData)
+
+proc setErrorHook*(s: GrpcServer; hook: ErrorHook) =
+  ## `hook` sees every handler exception that is not a GrpcError (those are the
+  ## handler's own answer); the client only gets UNKNOWN "internal error". It
+  ## runs on the worker thread of the call, so it must be thread-safe. Without a
+  ## hook nothing is logged. Set it before `start`.
+  doAssert not s.started, "the error hook must be set before start"
+  s.reg.errorHook = hook
 
 proc callUnary(ctx: var ServerContext; request: seq[byte]; userData: pointer): seq[byte]
     {.nimcall, gcsafe, raises: [CatchableError].} =

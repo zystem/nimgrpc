@@ -1,6 +1,6 @@
 ## gRPC wire helpers, and the unary interop cases run in-process.
 
-import std/unittest
+import std/[unittest, atomics, locks]
 import nimgrpc, nimgrpc/wire
 import ./interop/interop
 import ./gen/grpc/testing/test_pb
@@ -20,6 +20,17 @@ suite "wire":
     check code(@[0'u8, 0, 0, 0, 5, 1]) == scInternal               # short payload
     check code(@[1'u8, 0, 0, 0, 0]) == scUnimplemented             # compressed
     check code(encodeMessage(newSeq[byte](101))) == scResourceExhausted
+
+  test "grpc content types: application/grpc, optionally with +subtype or ;parameters":
+    check isGrpcContentType("application/grpc")
+    check isGrpcContentType("application/grpc+proto")
+    check isGrpcContentType("application/grpc+json")
+    check isGrpcContentType("application/grpc;charset=utf-8")
+    check not isGrpcContentType("application/grpcx")
+    check not isGrpcContentType("application/grpc-web")
+    check not isGrpcContentType("application/grp")
+    check not isGrpcContentType("application/json")
+    check not isGrpcContentType("")
 
   test "grpc-timeout":
     check encodeTimeout(250) == "250m"
@@ -96,6 +107,26 @@ proc failing(ctx: var ServerContext; req: seq[byte]): seq[byte]
     {.nimcall, gcsafe, raises: [CatchableError].} =
   raise newException(ValueError, "not a gRPC error")
 
+proc aborting(ctx: var ServerContext; req: seq[byte]): seq[byte]
+    {.nimcall, gcsafe, raises: [CatchableError].} =
+  raise newGrpcError(scAborted, "the handler's own words")
+
+# What the error hook saw, kept in fixed buffers so that no string crosses threads.
+var hookLock: Lock
+hookLock.initLock()
+var hookCalls: Atomic[int]
+var hookPath, hookMsg: array[64, char]
+
+proc copyTo(dst: var array[64, char]; s: string) =
+  for i in 0 ..< min(s.len, dst.len - 1): dst[i] = s[i]
+
+proc recordError(path: string; e: ref CatchableError) {.nimcall, gcsafe, raises: [].} =
+  withLock hookLock:
+    {.cast(gcsafe).}:
+      hookPath.copyTo path
+      hookMsg.copyTo e.msg
+  hookCalls.atomicInc
+
 suite "handler errors":
   test "an unexpected exception becomes UNKNOWN and the server keeps going":
     let srv = newGrpcServer()
@@ -111,7 +142,44 @@ suite "handler errors":
         code = e.code
         msg = e.msg
       check code == scUnknown
-      check msg == "not a gRPC error"
+      check msg == "internal error"       # the exception text stays on the server
+    ch.close()
+    srv.stop()
+
+  test "the error hook gets the path and the exception; a GrpcError does not reach it":
+    hookCalls.store 0
+    withLock hookLock:
+      {.cast(gcsafe).}:
+        hookPath = default(array[64, char])
+        hookMsg = default(array[64, char])
+    let srv = newGrpcServer()
+    srv.addUnary("/t.T/Fail", failing)
+    srv.addUnary("/t.T/Abort", aborting)
+    srv.setErrorHook(recordError)
+    srv.start()
+    let ch = dial("127.0.0.1", srv.port)
+    var code = scOk
+    var msg = ""
+    try:
+      discard ch.unaryCall("/t.T/Abort", @[])
+    except GrpcError as e:
+      code = e.code
+      msg = e.msg
+    check code == scAborted
+    check msg == "the handler's own words"
+    check hookCalls.load == 0
+    try:
+      discard ch.unaryCall("/t.T/Fail", @[])
+    except GrpcError as e:
+      code = e.code
+      msg = e.msg
+    check code == scUnknown
+    check msg == "internal error"
+    check hookCalls.load == 1
+    withLock hookLock:
+      {.cast(gcsafe).}:
+        check $cast[cstring](hookPath[0].addr) == "/t.T/Fail"
+        check $cast[cstring](hookMsg[0].addr) == "not a gRPC error"
     ch.close()
     srv.stop()
 
@@ -217,6 +285,52 @@ suite "compression":
                           compression = "gzip", timeoutMs = 5000)
     check r.payload.body.len == 50_000
     ch.close()
+
+suite "request validation":
+  proc rawCall(port: int; contentType: string; extra: seq[Header]): h2b.Response =
+    let c = h2b.dial("127.0.0.1", Port(port))
+    var hs = @[(":method", "POST"), (":scheme", "http"), (":authority", "x"),
+               (":path", "/grpc.testing.TestService/EmptyCall"),
+               ("content-type", contentType), ("te", "trailers")]
+    hs.add extra
+    result = c.request(hs, encodeMessage([]), timeoutMs = 5000)
+    c.close()
+
+  proc statusOf(r: h2b.Response): string =
+    for blk in [r.trailers, r.headers]:
+      for (k, v) in blk:
+        if k == "grpc-status": return v
+
+  proc httpStatus(r: h2b.Response): string =
+    for (k, v) in r.headers:
+      if k == ":status": return v
+
+  var srv: GrpcServer
+  setup:
+    srv = newTestServer()
+    srv.start()
+  teardown:
+    srv.stop()
+
+  test "a content-type that only starts like application/grpc gets 415":
+    check rawCall(srv.port, "application/grpcx", @[]).httpStatus == "415"
+    check rawCall(srv.port, "application/grpc-web", @[]).httpStatus == "415"
+    check rawCall(srv.port, "text/plain", @[]).httpStatus == "415"
+    for ok in ["application/grpc", "application/grpc+proto", "application/grpc;charset=utf-8"]:
+      let r = rawCall(srv.port, ok, @[])
+      check r.httpStatus == "200"
+      check r.statusOf == "0"
+
+  test "a malformed grpc-timeout is INTERNAL, a valid one or none works":
+    for bad in ["-1S", "5x", "", "S", "123456789m", "5 S"]:
+      let r = rawCall(srv.port, "application/grpc", @[("grpc-timeout", bad)])
+      check r.statusOf == $ord(scInternal)
+      var msg = ""
+      for (k, v) in r.headers:
+        if k == "grpc-message": msg = v
+      check msg == "malformed grpc-timeout"
+    check rawCall(srv.port, "application/grpc", @[("grpc-timeout", "5S")]).statusOf == "0"
+    check rawCall(srv.port, "application/grpc", @[]).statusOf == "0"
 
 when defined(linux):
   import std/[net, times]
