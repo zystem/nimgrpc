@@ -158,10 +158,11 @@ suite "troubleshooting page":
     let first = dial("127.0.0.1", single.port)
     discard first.unaryCall("/t.T/Echo", @[1'u8], timeoutMs = 5000)
     shows(call(single.port), "scUnavailable", "connection closed by peer")
-    first.close()
-    let afterClose = failure:
+    first.shutdown()     # not `close`: that frees the channel, which may not be used after it
+    let afterShutdown = failure:
       discard first.unaryCall("/t.T/Echo", @[1'u8])
-    shows(afterClose, "scUnavailable", "channel closed")
+    shows(afterShutdown, "scUnavailable", "channel closed")
+    first.close()
 
     let badIdentity = failure:
       discard tlsServerConfig("not a certificate", "nor a key")

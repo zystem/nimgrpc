@@ -30,7 +30,7 @@ failures marked **(run)** happen and compares the text.
 | Message | Meaning | What to do |
 |---|---|---|
 | `Connection refused` **(run)** | Nothing listens on that address and port. A server listens on `127.0.0.1` unless told otherwise. | Check the port; start the server with `address = "0.0.0.0"` or `"::"` to be reached from another host. |
-| `Name or service not known` (after `Invalid argument`) **(run)**, `cannot resolve NAME` (chronos) | The name does not resolve. | Check the name and the resolver. |
+| `Name or service not known` (on a second line, after the system's own first line) **(run)**, `cannot resolve NAME` (chronos) | The name does not resolve. | Check the name and the resolver. |
 | `no usable address for NAME` | The name resolved to no address the socket can use. | Check the records of the name. |
 | `connect to NAME timed out` | No answer to the TCP connection within `connectTimeoutMs` (20 s). | Check the route and the firewall; a smaller `connectTimeoutMs` fails sooner. |
 | `connection closed by peer` **(run)** | The other side closed the connection. Seen at the first call it most often means: a plaintext client met a TLS server; a server that requires a client certificate got none; the server is over `maxConnections` or `maxConnectionsPerIp`. | Give `dial` a TLS config; give the client its certificate and key; raise the limit or use fewer connections. |
@@ -49,7 +49,7 @@ failures marked **(run)** happen and compares the text.
 | `connection is going away (GOAWAY)` | The server said it takes no new calls on this connection (it is stopping, or the connection is old or idle). | Nothing: the channel dials again. A call that fails with it was not started. |
 | `connection drained`, `grace of the connection over` | The server closed a connection after `maxConnectionAgeMs` or `maxConnectionIdleMs`; calls still running after `maxConnectionAgeGraceMs` were cancelled. | Raise the grace if calls are longer than it. |
 | `connection closed: REASON`, `closed`, `read error`, `write error`, `session finished` | The connection ended: by `close`, by a socket error, or by an HTTP/2 error. | Call again; the channel dials a new connection. |
-| `channel closed` **(run)** | The call was made on a channel after its `close`. | Dial a new channel. |
+| `channel closed` **(run)** | The call was made on a channel after its `shutdown` (blocking), or after `close` of a chronos channel. A blocking channel must not be used at all after `close`: it is freed. | Dial a new channel. |
 | `stream reset with HTTP/2 error 7 (REFUSED_STREAM)` | The server did not start the call: over `maxConcurrentStreams`, or it is stopping. `e.unprocessed` is true. | Safe to send again; `unaryCall` already did, twice. Open fewer calls at once or raise the limit. |
 | `stream reset with HTTP/2 error N` | The peer reset the call; `N` is the HTTP/2 error code (8: cancelled, 11: ENHANCE_YOUR_CALM). | 8 from a server of this library: `Limits.maxCallMs` passed, or the server stopped. |
 

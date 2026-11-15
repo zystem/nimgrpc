@@ -963,6 +963,14 @@ proc finishHandlerLocked(c: ptr ConnObj; id: int32) =
         c.sess.resetStream(id, INTERNAL_ERROR)
         c.queueOutputLocked()
       except CatchableError: discard
+    elif s.outEnded and not s.inEnded and not s.closed and not c.closed:
+      # The response is complete but the client is still sending (a request refused for its
+      # size, say): tell it to stop, as other gRPC servers do. Nobody reads the rest, so the
+      # window of the stream stays shut and the client would wait for room until its deadline.
+      try:
+        c.sess.resetStream(id, NO_ERROR)
+        c.queueOutputLocked()
+      except CatchableError: discard
     c.dropStreamLocked(id) # a late close event finds nothing and is ignored
   dec c.pending
   c.wakeAll()
