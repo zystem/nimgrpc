@@ -18,14 +18,15 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: /opt/nghttp2
-        key: nghttp2-1.68.1-${{ runner.os }}
+        key: nghttp2-1.71.0-${{ runner.os }}
     - name: Build nghttp2 (static, as docs/building.md)
       if: steps.ng.outputs.cache-hit != 'true'
       shell: bash
       run: |
-        curl -fsSLO "https://github.com/nghttp2/nghttp2/releases/download/v1.68.1/nghttp2-1.68.1.tar.xz"
-        tar xf nghttp2-1.68.1.tar.xz
-        cd nghttp2-1.68.1
+        curl -fsSLO "https://github.com/nghttp2/nghttp2/releases/download/v1.71.0/nghttp2-1.71.0.tar.xz"
+        echo "c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116  nghttp2-1.71.0.tar.xz" | sha256sum -c -
+        tar xf nghttp2-1.71.0.tar.xz
+        cd nghttp2-1.71.0
         cmake -S . -B build -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF \
           -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX=/opt/nghttp2

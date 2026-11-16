@@ -77,6 +77,10 @@ thread). Every combination passes in plaintext, TLS and mutual TLS:
 | chronos → grpc-go | 19/19 with `--lenient-compression` (see above) |
 | chronos → grpc-go, `keepalive_enforced` | pass: GOAWAY too_many_pings, UNAVAILABLE, then a new connection |
 
+## nghttp2 1.71.0, 2026-11-16
+
+Run again with the Nim peers built against nghttp2 1.71.0 (Linux x86-64, Nim 2.4.0, grpc-go v1.76.0), once each in plaintext, TLS and mutual TLS: blocking and chronos clients against blocking and chronos servers, the grpc-go client against both Nim servers (compression probes included), and both Nim clients against the grpc-go server (`--lenient-compression`). All 24 runs passed every case. Not run this time: `keepalive_enforced`, the two rejection cases above, and the five-in-a-row repetition.
+
 Not covered yet: the Google auth cases (they need Google credentials), and the
 load-balancing and xDS cases.
 

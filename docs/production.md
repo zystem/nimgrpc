@@ -9,7 +9,7 @@ measured in a large deployment ([security-requirements.md](security-requirements
 ## Version
 
 - [ ] The latest release; the tag checked (`git tag -v`, [../SECURITY.md](../SECURITY.md)).
-- [ ] nghttp2 at the version of [building.md](building.md) (1.68.1), zlib from an updated system.
+- [ ] nghttp2 at the version of [building.md](building.md) (1.71.0), zlib from an updated system.
 - [ ] Nim from [supported-versions.md](supported-versions.md); read
       [nim-compiler-notes.md](nim-compiler-notes.md) if your handlers use `finally` or `defer`.
 - [ ] A release build with the hardening flags of [building.md](building.md) ("Hardening"):

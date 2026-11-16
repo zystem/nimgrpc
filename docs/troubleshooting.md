@@ -19,7 +19,7 @@ failures marked **(run)** happen and compares the text.
 | Message | Meaning | What to do |
 |---|---|---|
 | `fatal error: nghttp2/nghttp2.h: No such file or directory` (the compiler prints it in the system's language) | nghttp2 is not where the build looks: `/opt/nghttp2`, or `deps/nghttp2` inside this repository. | Build it ([building.md](building.md); `tools/build-nghttp2.sh` in a clone) or pass `-d:nghttp2Prefix=/path`. |
-| `nimgrpc needs nghttp2 1.61.0 or later` | The nghttp2 header found is older than 1.61.0. | Build nghttp2 1.68.1 and point the build at it. |
+| `nimgrpc needs nghttp2 1.61.0 or later` | The nghttp2 header found is older than 1.61.0. | Build nghttp2 1.71.0 and point the build at it. |
 | `cannot open file: bearssl` or `chronos` | A nimble package is missing. | `nimble install bearssl chronos`, or `nimble install -y --depsOnly` in a clone. |
 | `unknown option "X" (expected blocking, async and/or descriptor)` | `protoc-gen-nim` got a `--nim_opt` it does not know. | Use `blocking`, `async`, `descriptor`, separated by commas. |
 | `'=copy' is not available for type <TlsConfigObj>` and the like | The program copies an object that owns a C resource. | Pass the `ref` (`TlsConfig`), or `share(config)` for another thread. |

@@ -10,7 +10,8 @@ permissions:
   contents: read
 
 env:
-  NGHTTP2_VERSION: 1.68.1
+  NGHTTP2_VERSION: 1.71.0
+  NGHTTP2_SHA256: c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116
 
 jobs:
   test:
@@ -43,6 +44,7 @@ jobs:
         if: steps.ng.outputs.cache-hit != 'true'
         run: |
           curl -fsSLO "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz"
+          echo "${NGHTTP2_SHA256}  nghttp2-${NGHTTP2_VERSION}.tar.xz" | sha256sum -c -
           tar xf "nghttp2-${NGHTTP2_VERSION}.tar.xz"
           cd "nghttp2-${NGHTTP2_VERSION}"
           cmake -S . -B build -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF \

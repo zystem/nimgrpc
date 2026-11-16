@@ -4,6 +4,11 @@ The latest release is supported ([SECURITY.md](../SECURITY.md)). Read the notes 
 
 General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new commit); rebuild nghttp2 if [building.md](building.md) names a new version; regenerate the code of your `.proto` files with the new `protoc-gen-nim` (generated code and the library are versioned together); run your tests.
 
+## Unreleased
+
+- **nghttp2 1.71.0**: the CI, [building.md](building.md) and `tools/build-nghttp2.sh` now use 1.71.0. Rebuilding is not required: no security advisory lies between 1.68.1 and 1.71.0, and the library still compiles against 1.61.0 or later. A program that stays on 1.68.1 keeps working; it is no longer what the tests run with.
+- **Interceptors** are new ([interceptors.md](interceptors.md)). A program that adds none behaves as before.
+
 ## 0.5.1
 
 - **Upgrade from 0.4.0 or 0.5.0 if a blocking server can get a unary request much larger than `maxMessage`**: such a client waited until its deadline (for ever without one) instead of getting RESOURCE_EXHAUSTED at once. Nothing to change in your code.
