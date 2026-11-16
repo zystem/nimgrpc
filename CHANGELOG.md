@@ -2,9 +2,6 @@
 
 ## Unreleased
 
-### Fixed
-- A connection no longer holds a Nim reference to the `TlsConfig` it was made with (`ConnObj.tlsConf`, blocking and chronos): the C side counts the owners of the configuration atomically since 0.3.1, so the reference only added reference-count traffic on an object that the caller's thread also uses, and a `Conn` is freed on the thread that closes it. A blocking `GrpcChannel` holds a `share` of the configuration instead of the caller's object, so `close` may run on a thread other than the one that dialled without touching the count of the object that thread passed to `dial`. Test: `tests/ttls.nim` ("channels dialled on several threads"); it passes on the old code too (the race is not reproduced), it guards the new ownership.
-
 ### Added
 - Interceptors: code that runs around every call, for authentication by metadata, logging and metrics in one place. `addInterceptor` on a server (`GrpcServer`, `AsyncGrpcServer`) and on a channel (`GrpcChannel`, `AsyncChannel`). A server interceptor sees the path, the metadata and the deadline of a call to a registered method before its request is decoded, may set response metadata, and either lets the call proceed or refuses it with a status; after the handler it sees what the handler raised. A client interceptor may change the metadata and the deadline of every `unaryCall` and `newCall` on the channel, those of generated clients included, and sees the outcome of a unary call. Interceptors see no messages. An interceptor that swallows the error of a call does not turn it into OK. With no interceptor added nothing changes. How to: [docs/interceptors.md](docs/interceptors.md); example: `examples/interceptors.nim`. Tests: `tests/tinterceptors.nim`.
 
@@ -15,6 +12,7 @@
 - chronos server: `stop` starts closing every connection before it waits for any of them (it closed them one after another).
 
 ### Fixed
+- A connection no longer holds a Nim reference to the `TlsConfig` it was made with (`ConnObj.tlsConf`, blocking and chronos): the C side counts the owners of the configuration atomically since 0.3.1, so the reference only added reference-count traffic on an object that the caller's thread also uses, and a `Conn` is freed on the thread that closes it. A blocking `GrpcChannel` holds a `share` of the configuration instead of the caller's object, so `close` may run on a thread other than the one that dialled without touching the count of the object that thread passed to `dial`. Test: `tests/ttls.nim` ("channels dialled on several threads"); it passes on the old code too (the race is not reproduced), it guards the new ownership.
 - chronos adapter (client and server): a connection was closed with the socket still holding bytes that had not been read, when the peer sent something right behind the frame that ended the connection (a PING behind its GOAWAY, say). The kernel then sends a TCP reset instead of an orderly end, and a reset can cost the peer what it has not read yet. A connection that is being closed now ends its own side first, throws away what the peer still sends until the peer ends its side, for one second at most, and closes the socket after that; a connection whose socket failed is closed at once as before. Found by h2spec (test 7, about one run in ten); the blocking adapter did not have it. Tests: `tests/tasynch2.nim` (suite "how a connection is closed").
 
 ## 0.5.1 — 2026-11-15
