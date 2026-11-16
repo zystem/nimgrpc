@@ -145,7 +145,7 @@ proc dial*(host: string; port: int; tls: TlsConfig = nil; serverName = "";
   initLock(c.lock)
   c.host = host
   c.port = port
-  c.tls = tls
+  c.tls = tls.share      # the channel's own object over the configuration: `close` may run on another thread than the one that dialled, and the user's object is then not touched by two threads
   c.serverName = serverName
   c.keepalive = keepalive
   c.connectTimeoutMs = connectTimeoutMs

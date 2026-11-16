@@ -380,3 +380,38 @@ suite "a configuration shared between threads":
       createThread(th[i], work, addr jobs[i])
     joinThreads(th)
     for i in 0 ..< 8: check oks[i] == 400
+
+  test "channels dialled on several threads from one configuration are closed by a thread that did not dial them":
+    # a connection holds no Nim reference to the configuration (the C side counts its owners atomically) and a channel holds an object of its own (`share`),
+    # so the object that a thread passes to `dial` is touched by that thread only, whoever closes the channel
+    let srv = newTestServer(tls = tlsServerConfig(pem"server.pem", pem"server.key"))
+    srv.start()
+    defer: srv.stop()
+    var master = tlsClientConfig(pem"ca.pem")
+    const threads = 6
+    const each = 40
+    type Job = tuple[m: ptr TlsConfig, port: int, chans: ptr array[each, GrpcChannel], ok: ptr int]
+    var chans: array[threads, array[each, GrpcChannel]]
+    var jobs: array[threads, Job]
+    var oks: array[threads, int]
+    var th: array[threads, Thread[ptr Job]]
+    proc work(j: ptr Job) {.thread.} =
+      {.cast(gcsafe).}:
+        var n = 0
+        for k in 0 ..< each:
+          var mine = j.m[].share
+          let ch = dial("127.0.0.1", j.port, mine, "localhost")
+          mine = nil                               # the thread's object goes at once, the channel has its own
+          try:
+            ch.echoOnce()
+            inc n
+          except GrpcError: discard
+          j.chans[][k] = ch
+        j.ok[] = n
+    for i in 0 ..< threads:
+      jobs[i] = (addr master, srv.port, addr chans[i], addr oks[i])
+      createThread(th[i], work, addr jobs[i])
+    joinThreads(th)
+    for i in 0 ..< threads:
+      check oks[i] == each
+      for ch in chans[i]: ch.close()                  # on this thread, not on the one that dialled
