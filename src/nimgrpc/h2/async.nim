@@ -54,7 +54,6 @@ type
     sess: H2Session
     peer: string               ## server: the address of the client, for `Limits.maxConnectionsPerIp`
     tls: TlsConn
-    tlsConf: TlsConfig
     tlsIn: seq[byte]
     tlsInPos: int
     plainOut: seq[byte]
@@ -759,7 +758,6 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   setTcpKeepalive(cint(transp.fd), keepalive.tcpSecs)
   let c = newConn(transp, newClientSession(manualFlow = true), nil, keepalive)
   if tls != nil:
-    c.tlsConf = tls
     try:
       c.tls = newClientTls(tls, if serverName.len > 0: serverName else: host)
     except TlsError as e:

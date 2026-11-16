@@ -63,7 +63,6 @@ type
     closed: bool          ## no more reading or writing
     failure: string
     tls: TlsConn          ## nil for plaintext; used only under `lock`
-    tlsConf: TlsConfig    ## client: keeps the config alive
     plainOut: seq[byte]   ## TLS: session output the engine has not taken yet
     plainPos: int         ## ... of which `plainOut[0 ..< plainPos]` is taken
     tlsIn: seq[byte]      ## TLS: records the engine has not taken yet
@@ -185,7 +184,6 @@ proc `=destroy`(c: ConnObj) =
   `=destroy`(c.failure.addr[])
   `=destroy`(c.peer.addr[])
   `=destroy`(c.tls.addr[])
-  `=destroy`(c.tlsConf.addr[])
   `=destroy`(c.plainOut.addr[])
   `=destroy`(c.tlsIn.addr[])
 
@@ -1342,7 +1340,6 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   result = newConn(sock, newClientSession(manualFlow = true), nil)
   result.ka = keepalive
   if tls != nil:
-    result.tlsConf = tls
     result.tls = newClientTls(tls, if serverName.len > 0: serverName else: host)
   result.start()
 
