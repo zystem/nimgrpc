@@ -294,14 +294,17 @@ proc readToEnd(s: snet.Socket; ms: int): Future[string] {.async.} =
       await sleepAsync(5.milliseconds)
   return "open"
 
-var goawayPort, goawayRounds, goawayResets: Atomic[int]
+var goawayPort, goawayRounds, goawayResets, goawayStuck: Atomic[int]
 var goawayDone: Atomic[bool]
 
 proc goawayThenPing() {.thread.} =
   ## 300 connections: GOAWAY, a gap of 0 to 190 microseconds, PING, then read to the end.
-  var rounds, resets = 0
+  var rounds, resets, stuck = 0
   for round in 0 ..< 300:
     let s = rawConnect(Port(goawayPort.load))
+    var tv = posix.Timeval(tv_sec: posix.Time(5))      # a server that never closes fails the test
+    discard posix.setsockopt(snet.getFd(s), posix.SOL_SOCKET, posix.SO_RCVTIMEO, tv.addr,
+                             posix.SockLen(sizeof(tv)))
     var buf: array[4096, byte]
     discard posix.recv(snet.getFd(s), buf[0].addr, buf.len, 0)       # the server's SETTINGS
     discard s.sendRaw(rawFrame(7, 0, 0, newSeq[byte](8)))            # GOAWAY, NO_ERROR
@@ -312,11 +315,13 @@ proc goawayThenPing() {.thread.} =
       let n = posix.recv(snet.getFd(s), buf[0].addr, buf.len, 0)
       if n > 0: continue
       if n < 0 and osLastError().int32 == posix.ECONNRESET: inc resets
+      if n < 0 and osLastError().int32 in [posix.EAGAIN, posix.EWOULDBLOCK]: inc stuck
       break
     inc rounds
     snet.close(s)
   goawayRounds.store rounds
   goawayResets.store resets
+  goawayStuck.store stuck
   goawayDone.store true
 
 suite "chronos h2: how a connection is closed":
@@ -337,6 +342,7 @@ suite "chronos h2: how a connection is closed":
       joinThread(th)
       ck goawayRounds.load == 300
       ck goawayResets.load == 0
+      ck goawayStuck.load == 0        # the server closed every one of them
       await srv.stop()
     run go()
 

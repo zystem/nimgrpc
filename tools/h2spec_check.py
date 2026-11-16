@@ -10,12 +10,11 @@ failure that now passes is only reported.
 import sys
 import xml.etree.ElementTree as ET
 
-# "section: test name" as h2spec writes them. RFC: differences between RFC 7540, which h2spec
-# 2.6.0 tests, and RFC 9113, which nghttp2 follows. RACES: the blocking test server answers as
-# soon as its worker runs, the answer can leave before the stray frame of the test arrives, and
-# h2spec looks only at the first frame it gets. The chronos test server is run with a delay
-# before its answer (tools/conformance.sh), so these races are not allowed for it: without the
-# delay they failed in 14 runs of 30, with it in none (docs/h2spec.md, 2026-11-16).
+# "section: test name" as h2spec writes them: differences between RFC 7540, which h2spec 2.6.0
+# tests, and RFC 9113, which nghttp2 follows (docs/h2spec.md explains each). Both test servers
+# are run with a delay before their answer (tools/conformance.sh), so the races of a server
+# that answers at once are not accepted: the answer left before the stray frame of the test
+# arrived, and h2spec looks only at the first frame it gets.
 RFC = {
     "http2/5.1: closed: Sends a DATA frame after sending RST_STREAM frame",
     "http2/5.1: closed: Sends a HEADERS frame after sending RST_STREAM frame",
@@ -27,11 +26,7 @@ RFC = {
     "http2/6.3: Sends a PRIORITY frame with 0x0 stream identifier",
     "http2/6.9.1: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1 on a stream",
 }
-RACES = {
-    "http2/5.1: half closed (remote): Sends a HEADERS frame",
-    'http2/6.1: Sends a DATA frame on the stream that is not in "open" or "half-closed (local)" state',
-}
-KNOWN = {"blocking": RFC | RACES, "async": RFC}
+KNOWN = {"blocking": RFC, "async": RFC}
 
 def main():
     if len(sys.argv) != 3 or sys.argv[2] not in KNOWN: sys.exit(__doc__)

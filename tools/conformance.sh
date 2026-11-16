@@ -16,9 +16,9 @@ build() { nim c -d:release --hints:off --mm:orc --panics:on --path:src --nimcach
 build h2specserver; build h2specasync; build hostiletarget
 status=0
 
-# The chronos server waits 100 ms before each answer, so that the stray frame h2spec sends after
-# a request is there before the answer closes the stream (docs/h2spec.md).
-for pair in "blocking h2specserver" "async h2specasync 100"; do
+# Both servers wait 100 ms before each answer, so that the stray frame h2spec sends after a
+# request is there before the answer closes the stream (docs/h2spec.md).
+for pair in "blocking h2specserver 100" "async h2specasync 100"; do
   set -- $pair
   echo "== h2spec, $1 adapter"
   "/tmp/$2" "$PORT" ${3:-} > /dev/null 2>&1 &
