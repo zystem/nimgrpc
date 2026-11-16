@@ -31,13 +31,7 @@ RACES = {
     "http2/5.1: half closed (remote): Sends a HEADERS frame",
     'http2/6.1: Sends a DATA frame on the stream that is not in "open" or "half-closed (local)" state',
 }
-# Open (docs/h2spec.md): after the peer's GOAWAY the chronos adapter closes the socket at once,
-# and a PING that arrives after that is answered by the kernel with a TCP reset, which h2spec
-# does not take for a closed connection. About one run in ten.
-ASYNC_OPEN = {
-    "http2/7: Sends a GOAWAY frame with unknown error code",
-}
-KNOWN = {"blocking": RFC | RACES, "async": RFC | ASYNC_OPEN}
+KNOWN = {"blocking": RFC | RACES, "async": RFC}
 
 def main():
     if len(sys.argv) != 3 or sys.argv[2] not in KNOWN: sys.exit(__doc__)

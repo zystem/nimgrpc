@@ -8,8 +8,13 @@
 ### Changed
 - nghttp2 1.71.0 (from 1.68.1) in the CI, `tools/build-nghttp2.sh` and the build instructions. The library's code did not change for it. Run against it on 2026-11-16: the 25 test files, `tools/hostile.sh` (both servers, 0 failed), the interop cases with grpc-go v1.76.0 in both directions in plaintext, TLS and mutual TLS (blocking and chronos peers), and h2spec 2.6.0 (the same results as with 1.68.0). The lowest version that builds is still 1.61.0.
 - The CI checks the SHA-256 of the nghttp2 archive it downloads, as `tools/build-nghttp2.sh` already did.
-- h2spec against the chronos adapter: `tools/h2specasync` takes a delay before its answer, `tools/conformance.sh` uses 100 ms, and with it the three timing artefacts of the test server no longer occur, so `tools/h2spec_check.py` no longer accepts them for this adapter. It accepts one other test (7, GOAWAY with an unknown code) that ends in a TCP reset about one run in ten; [docs/h2spec.md](docs/h2spec.md) has the runs and says what is open.
+- h2spec against the chronos adapter: `tools/h2specasync` takes a delay before its answer, `tools/conformance.sh` uses 100 ms, and with it the three timing artefacts of the test server no longer occur, so `tools/h2spec_check.py` accepts nothing for this adapter but the nine differences between RFC 7540 and RFC 9113; [docs/h2spec.md](docs/h2spec.md) has the runs.
+- chronos server: `stop` starts closing every connection before it waits for any of them (it closed them one after another).
 
+### Fixed
+- chronos adapter (client and server): a connection was closed with the socket still holding bytes that had not been read, when the peer sent something right behind the frame that ended the connection (a PING behind its GOAWAY, say). The kernel then sends a TCP reset instead of an orderly end, and a reset can cost the peer what it has not read yet. A connection that is being closed now ends its own side first, throws away what the peer still sends until the peer ends its side, for one second at most, and closes the socket after that; a connection whose socket failed is closed at once as before. Found by h2spec (test 7, about one run in ten); the blocking adapter did not have it. Tests: `tests/tasynch2.nim` (suite "how a connection is closed").
+
+## 0.5.1 — 2026-11-15
 
 ### Added
 - Examples: `examples/hello.nim` (a server and a client in one process, no generated code), `examples/greeter/` (a service from `hello.proto` through generated code: a server with health and reflection, a client, and both on chronos), and [examples/README.md](examples/README.md), a tutorial with what every command prints.

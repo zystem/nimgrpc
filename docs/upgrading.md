@@ -8,6 +8,7 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 - **nghttp2 1.71.0**: the CI, [building.md](building.md) and `tools/build-nghttp2.sh` now use 1.71.0. Rebuilding is not required: no security advisory lies between 1.68.1 and 1.71.0, and the library still compiles against 1.61.0 or later. A program that stays on 1.68.1 keeps working; it is no longer what the tests run with.
 - **Interceptors** are new ([interceptors.md](interceptors.md)). A program that adds none behaves as before.
+- **chronos: closing a connection** now ends our side first and waits for the peer to end its side, one second at most, before the socket is closed. A peer that reads its end of stream and closes, as gRPC clients and servers do, sees no difference in time; `AsyncChannel.close` and `AsyncGrpcServer.stop` can take up to a second longer with a peer that never closes its side. `stop` closes all connections at once, so the second is not per connection.
 
 ## 0.5.1
 
