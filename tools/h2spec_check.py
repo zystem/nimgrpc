@@ -10,10 +10,12 @@ failure that now passes is only reported.
 import sys
 import xml.etree.ElementTree as ET
 
-# "section: test name" as h2spec writes them. The first nine are differences between RFC 7540,
-# which h2spec 2.6.0 tests, and RFC 9113, which nghttp2 follows. RACES are races: the
-# test server answers at once, the answer can leave before the stray frame arrives, and h2spec
-# looks only at the first frame it gets. Either adapter can lose either race.
+# "section: test name" as h2spec writes them. RFC: differences between RFC 7540, which h2spec
+# 2.6.0 tests, and RFC 9113, which nghttp2 follows. RACES: the blocking test server answers as
+# soon as its worker runs, the answer can leave before the stray frame of the test arrives, and
+# h2spec looks only at the first frame it gets. The chronos test server is run with a delay
+# before its answer (tools/conformance.sh), so these races are not allowed for it: without the
+# delay they failed in 14 runs of 30, with it in none (docs/h2spec.md, 2026-11-16).
 RFC = {
     "http2/5.1: closed: Sends a DATA frame after sending RST_STREAM frame",
     "http2/5.1: closed: Sends a HEADERS frame after sending RST_STREAM frame",
@@ -29,12 +31,13 @@ RACES = {
     "http2/5.1: half closed (remote): Sends a HEADERS frame",
     'http2/6.1: Sends a DATA frame on the stream that is not in "open" or "half-closed (local)" state',
 }
-# Seen with the chronos adapter only (docs/h2spec.md, 2026-11-16): the stream is answered and
-# closed before the stray DATA frame arrives.
-ASYNC_RACES = {
-    "http2/5.1: half closed (remote): Sends a DATA frame",
+# Open (docs/h2spec.md): after the peer's GOAWAY the chronos adapter closes the socket at once,
+# and a PING that arrives after that is answered by the kernel with a TCP reset, which h2spec
+# does not take for a closed connection. About one run in ten.
+ASYNC_OPEN = {
+    "http2/7: Sends a GOAWAY frame with unknown error code",
 }
-KNOWN = {"blocking": RFC | RACES, "async": RFC | RACES | ASYNC_RACES}
+KNOWN = {"blocking": RFC | RACES, "async": RFC | ASYNC_OPEN}
 
 def main():
     if len(sys.argv) != 3 or sys.argv[2] not in KNOWN: sys.exit(__doc__)

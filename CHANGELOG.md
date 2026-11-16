@@ -8,7 +8,7 @@
 ### Changed
 - nghttp2 1.71.0 (from 1.68.1) in the CI, `tools/build-nghttp2.sh` and the build instructions. The library's code did not change for it. Run against it on 2026-11-16: the 25 test files, `tools/hostile.sh` (both servers, 0 failed), the interop cases with grpc-go v1.76.0 in both directions in plaintext, TLS and mutual TLS (blocking and chronos peers), and h2spec 2.6.0 (the same results as with 1.68.0). The lowest version that builds is still 1.61.0.
 - The CI checks the SHA-256 of the nghttp2 archive it downloads, as `tools/build-nghttp2.sh` already did.
-- `tools/h2spec_check.py` knows one more timing artefact of the chronos test server (5.1 "half closed (remote): DATA"); [docs/h2spec.md](docs/h2spec.md) says why it is one.
+- h2spec against the chronos adapter: `tools/h2specasync` takes a delay before its answer, `tools/conformance.sh` uses 100 ms, and with it the three timing artefacts of the test server no longer occur, so `tools/h2spec_check.py` no longer accepts them for this adapter. It accepts one other test (7, GOAWAY with an unknown code) that ends in a TCP reset about one run in ten; [docs/h2spec.md](docs/h2spec.md) has the runs and says what is open.
 
 
 ### Added
