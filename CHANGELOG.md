@@ -5,7 +5,11 @@
 ### Added
 - Interceptors: code that runs around every call, for authentication by metadata, logging and metrics in one place. `addInterceptor` on a server (`GrpcServer`, `AsyncGrpcServer`) and on a channel (`GrpcChannel`, `AsyncChannel`). A server interceptor sees the path, the metadata and the deadline of a call to a registered method before its request is decoded, may set response metadata, and either lets the call proceed or refuses it with a status; after the handler it sees what the handler raised. A client interceptor may change the metadata and the deadline of every `unaryCall` and `newCall` on the channel, those of generated clients included, and sees the outcome of a unary call. Interceptors see no messages. An interceptor that swallows the error of a call does not turn it into OK. With no interceptor added nothing changes. How to: [docs/interceptors.md](docs/interceptors.md); example: `examples/interceptors.nim`. Tests: `tests/tinterceptors.nim`.
 
-## 0.5.1 — 2026-11-15
+### Changed
+- nghttp2 1.71.0 (from 1.68.1) in the CI, `tools/build-nghttp2.sh` and the build instructions. The library's code did not change for it. Run against it on 2026-11-16: the 25 test files, `tools/hostile.sh` (both servers, 0 failed), the interop cases with grpc-go v1.76.0 in both directions in plaintext, TLS and mutual TLS (blocking and chronos peers), and h2spec 2.6.0 (the same results as with 1.68.0). The lowest version that builds is still 1.61.0.
+- The CI checks the SHA-256 of the nghttp2 archive it downloads, as `tools/build-nghttp2.sh` already did.
+- `tools/h2spec_check.py` knows one more timing artefact of the chronos test server (5.1 "half closed (remote): DATA"); [docs/h2spec.md](docs/h2spec.md) says why it is one.
+
 
 ### Added
 - Examples: `examples/hello.nim` (a server and a client in one process, no generated code), `examples/greeter/` (a service from `hello.proto` through generated code: a server with health and reflection, a client, and both on chronos), and [examples/README.md](examples/README.md), a tutorial with what every command prints.

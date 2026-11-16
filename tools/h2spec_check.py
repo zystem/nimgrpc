@@ -11,7 +11,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 # "section: test name" as h2spec writes them. The first nine are differences between RFC 7540,
-# which h2spec 2.6.0 tests, and RFC 9113, which nghttp2 follows. The last two are races: the
+# which h2spec 2.6.0 tests, and RFC 9113, which nghttp2 follows. RACES are races: the
 # test server answers at once, the answer can leave before the stray frame arrives, and h2spec
 # looks only at the first frame it gets. Either adapter can lose either race.
 RFC = {
@@ -29,7 +29,12 @@ RACES = {
     "http2/5.1: half closed (remote): Sends a HEADERS frame",
     'http2/6.1: Sends a DATA frame on the stream that is not in "open" or "half-closed (local)" state',
 }
-KNOWN = {"blocking": RFC | RACES, "async": RFC | RACES}
+# Seen with the chronos adapter only (docs/h2spec.md, 2026-11-16): the stream is answered and
+# closed before the stray DATA frame arrives.
+ASYNC_RACES = {
+    "http2/5.1: half closed (remote): Sends a DATA frame",
+}
+KNOWN = {"blocking": RFC | RACES, "async": RFC | RACES | ASYNC_RACES}
 
 def main():
     if len(sys.argv) != 3 or sys.argv[2] not in KNOWN: sys.exit(__doc__)

@@ -43,3 +43,14 @@ artefact in 5.1.1 drops out.
 `tools/conformance.sh` runs h2spec against both adapters in the workflow `Hostile client` (weekly, and when its files change) and fails on a failure that is not one of those above (`tools/h2spec_check.py`). It also asks both servers for their services with grpcurl, a client of server reflection that this project did not write.
 
 The first run there (2026-11-15, nimgrpc 0.4.0, GitHub's runner): **146 tests, 135 passed, 1 skipped, 10 failed** on each adapter. The blocking adapter failed the nine tests of the first table and one more, 6.1 "Sends a DATA frame on the stream that is not in open or half-closed (local) state" (got: DATA). It is the same race as 5.1 "half closed (remote): HEADERS" of the chronos adapter: the test server's answer left before the stray frame arrived, and h2spec looks only at the first frame. Both races are in the known list for both adapters; a run where one of them passes says so.
+
+## nghttp2 1.71.0, 2026-11-16
+
+Run again with `tools/conformance.sh` when the CI moved from nghttp2 1.68.1 to 1.71.0, on one machine (Linux x86-64, Nim 2.4.0), once with the library built against 1.71.0 and once against 1.68.0:
+
+| Adapter | nghttp2 1.71.0 | nghttp2 1.68.0 |
+|:---|:---|:---|
+| blocking | 146 tests, 136 passed, 1 skipped, 9 failed | the same |
+| chronos | 146 tests, 133 passed, 1 skipped, 12 failed | 146 tests, 134 passed, 1 skipped, 11 failed |
+
+The blocking adapter fails the nine tests of the first table with both versions, and no other. The chronos adapter fails those nine and two or three of the timing artefacts: 5.1 "half closed (remote): HEADERS", 6.1 "DATA on a stream that is not open", and 5.1 "half closed (remote): DATA". The last one was not listed before. It is the same race: the test server has answered and closed the stream before the stray DATA frame arrives, and nghttp2 ignores a frame on a stream closed a moment ago. Section 5.1 alone, six times in a row against the chronos adapter, failed six or seven of its 16 tests from run to run with 1.71.0 and with 1.68.0 alike. So the difference between the two columns is timing, not the version. `tools/h2spec_check.py` now knows this race for the chronos adapter.

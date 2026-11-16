@@ -20,7 +20,7 @@ the second number and a fix the third ([releasing.md](releasing.md)).
 | Part | Required | Run with | Notes |
 |---|---|---|---|
 | Nim | 2.2.12 ✔ or later | 2.2.12, 2.2.14, 2.4.0 ✔ in CI on every pull request | `--mm:orc`; [nim-compiler-notes.md](nim-compiler-notes.md) for 2.2.12 and 2.2.14 |
-| nghttp2 | 1.61.0 ✔ or later (an older header fails the build) | 1.68.1 ✔ in CI | linked statically; 1.68.1 fixes CVE-2026-27135 |
+| nghttp2 | 1.61.0 ✔ or later (an older header fails the build) | 1.71.0 ✔ in CI | linked statically; 1.68.1 or later has the fix of CVE-2026-27135 |
 | bearssl (nimble) | 0.3.1 ✔ or later | 0.3.1 | BearSSL itself is compiled from the package's source |
 | chronos (nimble) | 4.0.4 ✔ or later | 4.4.1 | only for the chronos API |
 | zlib | the system's (`-lz`), or `-d:zlibStatic` | 1.3 (Ubuntu 24.04's package) | |

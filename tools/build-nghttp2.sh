@@ -5,8 +5,8 @@
 # root is needed and nothing outside the repository changes. Needs curl, tar with xz, cmake,
 # a C compiler and sha256sum.
 set -eu
-VERSION=1.68.1
-SHA256=6abd7ab0a7f1580d5914457cb3c85eb80455657ee5119206edbd7f848c14f0b2
+VERSION=1.71.0
+SHA256=c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116
 root=$(cd "$(dirname "$0")/.." && pwd)
 prefix=${1:-$root/deps/nghttp2}
 case $prefix in /*) ;; *) prefix=$(pwd)/$prefix ;; esac
