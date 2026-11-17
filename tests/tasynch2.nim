@@ -1,10 +1,12 @@
 ## The chronos HTTP/2 adapter: async client and server, and both mixed with
 ## the blocking adapter.
 
-import std/[unittest, strutils, typedthreads, atomics, os]
+import std/[unittest, strutils, typedthreads, atomics, os, monotimes]
 import pkg/chronos
 import nimgrpc/h2/async
 from nimgrpc/h2/blocking as blk import nil
+from std/net as snet import nil
+from std/posix import nil
 
 proc toBytes(s: string): seq[byte] = @(s.toOpenArrayByte(0, s.high))
 proc toStr(b: seq[byte]): string =
@@ -257,6 +259,116 @@ suite "chronos h2":
       waitFor sleepAsync(5.milliseconds)
     joinThread(th)
     check ok
+
+proc rawFrame(typ, flags: byte; stream: uint32; payload: seq[byte]): seq[byte] =
+  result = @[byte(payload.len shr 16), byte(payload.len shr 8), byte(payload.len), typ, flags,
+             byte(stream shr 24), byte(stream shr 16), byte(stream shr 8), byte(stream)]
+  result.add payload
+
+proc rawConnect(port: Port): snet.Socket =
+  ## An ordinary socket with the HTTP/2 preface and SETTINGS sent. chronos' own transport cannot
+  ## be the peer here: it reports a TCP reset as an end of stream.
+  result = snet.newSocket(buffered = false)
+  snet.connect(result, "127.0.0.1", port)
+  var hello = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".toBytes
+  hello.add rawFrame(4, 0, 0, @[])                                 # SETTINGS
+  discard snet.send(result, hello[0].addr, hello.len)
+
+const msgDontWait = 0x40.cint     # MSG_DONTWAIT on Linux; std/posix does not have it
+
+proc sendRaw(s: snet.Socket; data: seq[byte]): bool =
+  posix.send(snet.getFd(s), data[0].unsafeAddr, data.len, posix.MSG_NOSIGNAL) == data.len
+
+proc readToEnd(s: snet.Socket; ms: int): Future[string] {.async.} =
+  ## How the connection ends for a peer that reads: "eof" for an orderly close, "reset" for a
+  ## TCP reset, "open" if it is still open after `ms`. Does not block the loop the server runs on.
+  var buf: array[4096, byte]
+  let deadline = Moment.now() + ms.milliseconds
+  while Moment.now() < deadline:
+    let n = posix.recv(snet.getFd(s), buf[0].addr, buf.len, msgDontWait)
+    if n == 0: return "eof"
+    if n < 0:
+      let err = osLastError()
+      if err.int32 == posix.ECONNRESET: return "reset"
+      if err.int32 notin [posix.EAGAIN, posix.EWOULDBLOCK, posix.EINTR]: return "error " & $err.int32
+      await sleepAsync(5.milliseconds)
+  return "open"
+
+var goawayPort, goawayRounds, goawayResets, goawayStuck: Atomic[int]
+var goawayDone: Atomic[bool]
+
+proc goawayThenPing() {.thread.} =
+  ## 300 connections: GOAWAY, a gap of 0 to 190 microseconds, PING, then read to the end.
+  var rounds, resets, stuck = 0
+  for round in 0 ..< 300:
+    let s = rawConnect(Port(goawayPort.load))
+    var tv = posix.Timeval(tv_sec: posix.Time(5))      # a server that never closes fails the test
+    discard posix.setsockopt(snet.getFd(s), posix.SOL_SOCKET, posix.SO_RCVTIMEO, tv.addr,
+                             posix.SockLen(sizeof(tv)))
+    var buf: array[4096, byte]
+    discard posix.recv(snet.getFd(s), buf[0].addr, buf.len, 0)       # the server's SETTINGS
+    discard s.sendRaw(rawFrame(7, 0, 0, newSeq[byte](8)))            # GOAWAY, NO_ERROR
+    let until = getMonoTime().ticks + int64(round mod 20) * 10_000    # nanoseconds
+    while getMonoTime().ticks < until: discard
+    discard s.sendRaw(rawFrame(6, 0, 0, newSeq[byte](8)))            # PING
+    while true:
+      let n = posix.recv(snet.getFd(s), buf[0].addr, buf.len, 0)
+      if n > 0: continue
+      if n < 0 and osLastError().int32 == posix.ECONNRESET: inc resets
+      if n < 0 and osLastError().int32 in [posix.EAGAIN, posix.EWOULDBLOCK]: inc stuck
+      break
+    inc rounds
+    snet.close(s)
+  goawayRounds.store rounds
+  goawayResets.store resets
+  goawayStuck.store stuck
+  goawayDone.store true
+
+suite "chronos h2: how a connection is closed":
+  test "a frame the server has not read when it closes gets no TCP reset":
+    # The peer says GOAWAY and sends a PING right behind it (what h2spec does in its test 7).
+    # The server has nothing left to do after the GOAWAY and closes. Closing a socket that
+    # holds unread bytes makes the kernel send a reset instead of an orderly end, and a reset
+    # can cost the peer what it has not read yet. Whether the PING is in between the server's
+    # last read and its close is a matter of timing, so a thread tries it many times with
+    # different gaps: before the fix about one round in ten was reset.
+    proc go() {.async.} =
+      let srv = newAsyncStreamServer(echoHandler)
+      goawayPort.store srv.port.int
+      goawayDone.store false
+      var th: Thread[void]
+      createThread(th, goawayThenPing)
+      while not goawayDone.load: await sleepAsync(5.milliseconds)
+      joinThread(th)
+      ck goawayRounds.load == 300
+      ck goawayResets.load == 0
+      ck goawayStuck.load == 0        # the server closed every one of them
+      await srv.stop()
+    run go()
+
+  test "a peer that never closes its side does not keep the connection":
+    proc go() {.async.} =
+      let srv = newAsyncStreamServer(echoHandler)
+      let s = rawConnect(srv.port)
+      await sleepAsync(50.milliseconds)
+      let t0 = Moment.now()
+      await srv.stop()                      # the peer holds its side open and reads nothing
+      ck Moment.now() - t0 < 3.seconds
+      ck (await s.readToEnd(2000)) == "eof"
+      snet.close(s)
+    run go()
+
+  test "stop closes many connections at once, not one after another":
+    proc go() {.async.} =
+      let srv = newAsyncStreamServer(echoHandler)
+      var held: seq[snet.Socket]
+      for i in 1 .. 20: held.add rawConnect(srv.port)
+      await sleepAsync(50.milliseconds)
+      let t0 = Moment.now()
+      await srv.stop()
+      ck Moment.now() - t0 < 3.seconds
+      for s in held: snet.close(s)
+    run go()
 
 suite "chronos client, blocking server":
   test "request against the blocking server":

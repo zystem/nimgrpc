@@ -21,6 +21,14 @@ import ./session, ./common, ./tcpopts, ../tls/tls, ../bytebuf
 export session.Header, session.H2Error, tls, common.H2Timeout,
        common.H2StreamClosed, common.Keepalive, common.PingPolicy, common.Limits
 
+const
+  closeLingerMs = 1000
+    ## How long a connection that is being closed waits for its peer to end its side (while what
+    ## the peer still sends is thrown away) before the socket is closed.
+  closeDiscardMax = 1 shl 20
+    ## How much of what the peer still sends is read and thrown away; a peer that sends more
+    ## than this to a closed connection is not waited for.
+
 type
   Task = Future[void].Raising([])   ## a loop task or handler; never fails
 
@@ -77,6 +85,8 @@ type
     lastPingRecv: Moment
     pingStrikes: int
     goawayReceived: bool
+    abortive: bool             ## the socket failed: nothing to wait for when closing
+    discarded: int             ## bytes read and thrown away since the connection was closed
     readerF, writerF, pingerF, guardF, lifeF: Task
 
   AsyncStreamHandler* = proc (st: AsyncH2Stream; userData: pointer): Future[void]
@@ -275,6 +285,13 @@ proc pumpTlsIn(c: AsyncH2Conn) =
   if app.len > 0: c.sess.recv(app)
   if c.tls.isClosed: raise newException(TlsError, c.tls.errorMessage)
 
+proc checkFinished(c: AsyncH2Conn) =
+  ## Ends the connection once the session has nothing more to read or write (after GOAWAY, with
+  ## no stream left) and all its output has gone to the socket. Asked after input and after a
+  ## write: the session can finish while the writer still holds bytes.
+  if not c.closed and c.outQ.len == 0 and not c.sess.wantRead() and not c.sess.wantWrite():
+    c.fail("session finished")
+
 proc onBytes(c: AsyncH2Conn; data: openArray[byte]) =
   ## Bytes from the socket: through TLS into the session, then events out.
   c.lastRead = Moment.now()
@@ -286,8 +303,7 @@ proc onBytes(c: AsyncH2Conn; data: openArray[byte]) =
       c.pumpTlsIn()
     c.handleEvents()
     c.queueOutput()
-    if not c.sess.wantRead() and not c.sess.wantWrite() and c.outQ.len == 0:
-      c.fail("session finished")
+    c.checkFinished()
   except CatchableError as e:
     # A connection error: nghttp2 has queued a GOAWAY; send it, then stop.
     try: c.queueOutput(force = true)
@@ -303,14 +319,19 @@ proc readerLoop(c: AsyncH2Conn) {.async: (raises: []).} =
       eof = true
       return (0, true)
     if not c.closed: c.onBytes(data)
+    else: c.discarded += data.len
     (data.len, true)
-  while not c.closed:
+  # Once the connection is closed the loop goes on and throws away what arrives, until the
+  # peer ends its side, it has sent `closeDiscardMax` bytes, or the writer closes the socket
+  # (see the end of `writerLoop`).
+  while c.discarded <= closeDiscardMax:
     try:
       await c.transp.readMessage(take)
     except CancelledError:
       c.fail("closed")
       break
     except CatchableError:
+      if not c.closed: c.abortive = true
       c.fail("read error")
       break
     if eof:
@@ -339,13 +360,25 @@ proc writerLoop(c: AsyncH2Conn) {.async: (raises: []).} =
           c.pumpTlsIn()
           c.handleEvents()
         c.queueOutput()
+        c.checkFinished()
       except CatchableError as e: c.fail(e.msg)
       c.notifyRoom()
     else:
+      c.abortive = true
       c.fail("write error")
       c.outQ.clear()
       c.outQBytes = 0
-  # Everything is out; closing the socket also ends the reader.
+  # Everything is out. Closing a socket that holds bytes we have not read makes the kernel
+  # send a reset, and a reset can cost the peer what it has not read yet (our GOAWAY, the end
+  # of a response). So: end our side, let the reader throw away what still arrives until the
+  # peer ends its side, for `closeLingerMs` at most, and only then close.
+  if not c.abortive and c.readerF != nil and not c.readerF.finished:
+    try:
+      await c.transp.shutdownWait()
+      discard await c.readerF.withTimeout(closeLingerMs.milliseconds)
+    except CancelledError: discard
+    except CatchableError: discard
+  # Closing the socket also ends the reader.
   await c.transp.closeWait()
 
 proc pingDue(c: AsyncH2Conn): int =
@@ -898,10 +931,14 @@ proc stop*(s: AsyncH2Server; graceMs = 0) {.async: (raises: []).} =
         c.closedEv.clear()
         try: discard await withTimeout(c.closedEv.wait(), deadline - Moment.now())
         except CancelledError: break
+  # Every connection starts closing before any is waited for: each may wait up to
+  # `closeLingerMs` for its peer to end its side.
+  var closing: seq[Task]
+  var running: seq[Task]
   for c in s.conns:
-    var running: seq[Task]
     for st in c.streams.values:
       if st.handler != nil and not st.handler.finished: running.add st.handler
-    await c.shutdown()            # streams close; handlers get cancelled
-    for f in running: await noCancel f
+    closing.add c.shutdown()      # streams close; handlers get cancelled
+  for f in closing: await noCancel f
+  for f in running: await noCancel f
   s.conns = @[]
