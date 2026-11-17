@@ -143,6 +143,28 @@ Linux x86-64, `-d:release`, one thread (`tools/asyncload.nim`):
   the BearSSL engine and its two record buffers (`gtls_conn`, `src/nimgrpc/tls/gtls.c`).
   The frame buffer and the TLS record buffers are the two places to save memory.
   The connection reads straight from that buffer, with no buffer of its own.
+- The blocking server against this one, measured on 2026-11-17 (Linux x86-64, 32 cores,
+  `-d:release`, plain HTTP/2, nghttp2 1.71.0, one measurement per point; the client is
+  `tools/asyncload.nim`, the blocking echo server was a throw-away program that is not in
+  the repository). Server RSS and threads, connections open and idle (no call):
+
+  | Connections | Blocking: RSS / threads | chronos: RSS / threads |
+  |---:|---|---|
+  | 100 | 15 MiB / 202 | 4.6 MiB / 1 |
+  | 1,000 | 125 MiB / 2,002 | 23 MiB / 1 |
+  | 5,000 | 620 MiB / 10,002 | 104 MiB / 1 |
+
+  That is about 123 KiB and two threads (a reader and a writer) per idle connection on the
+  blocking server, against about 20 KiB and no thread on chronos. With one streaming call
+  open on each connection the blocking server takes about 255 KiB per connection (100
+  connections: 302 threads) and serves no more than about 256 calls at once: the
+  handler limit `maxWorkers`, because a streaming handler holds a worker for as long as
+  the call lasts. Further calls wait; with 500 connections the client had not seen all its
+  calls open after 30 s. chronos held 2,000 connections with a call each in 80 MiB. So
+  many idle clients cost the blocking server threads, and many open calls hit its worker
+  limit; for either, use the chronos server. Not measured: TLS, requests per second, latency.
+  Moving the blocking server's reading and writing to `epoll` would remove the two threads
+  per idle connection, not the worker limit; it is not planned (see [roadmap.md](roadmap.md)).
 - 5,000 concurrent unary calls on one channel, and 1,000 concurrent streams on
   one connection, from one thread (`tests/tasyncgrpc.nim`, `tests/tasynch2.nim`).
 - h2spec against `tools/h2specasync`: 134 of 146 passed; see

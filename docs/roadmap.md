@@ -23,3 +23,4 @@ What the project intends to do and not do in the next year. It is a plan of one 
 - Being a gRPC-Web or HTTP/1.1 gateway.
 - Authentication schemes beyond TLS, mTLS and metadata (the program decides).
 - Pure-Nim replacements of nghttp2, BearSSL or zlib.
+- The blocking server on `epoll` (no reader and writer thread per connection). Measured on 2026-11-17 ([async.md](async.md)): it would save two threads and about 100 KiB per idle connection but not the limit of about 256 open streaming calls; the chronos server covers both. Reconsidered if a user needs thousands of idle connections on the blocking server.
