@@ -4,11 +4,14 @@ The latest release is supported ([SECURITY.md](../SECURITY.md)). Read the notes 
 
 General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new commit); rebuild nghttp2 if [building.md](building.md) names a new version; regenerate the code of your `.proto` files with the new `protoc-gen-nim` (generated code and the library are versioned together); run your tests.
 
-## Unreleased
+## 0.6.0
 
+- **Interceptors** are new ([interceptors.md](interceptors.md)): `addInterceptor` on a server and on a channel, blocking and chronos. A program that adds none behaves as before. This is why the number is 0.6: the API grows; nothing existing changes.
+- **chronos: closing a connection** now ends our side first and waits for the peer to end its side, one second at most (and one mebibyte of what the peer still sends), before the socket is closed. A peer that reads its end of stream and closes, as gRPC clients and servers do, sees no difference in time; `AsyncChannel.close` and `AsyncGrpcServer.stop` can take up to a second longer with a peer that never closes its side. `stop` closes all connections at once, so the second is not per connection. Before, a peer that sent a frame right behind the one that ended the connection (a PING behind its GOAWAY) could get a TCP reset, and a connection whose peer had sent GOAWAY could stay open until the peer closed it; both are fixed.
+- **A blocking channel holds its own share of the `TlsConfig`** it was dialled with, so it may be closed on another thread than the one that dialled it. Nothing to change in your code.
 - **nghttp2 1.71.0**: the CI, [building.md](building.md) and `tools/build-nghttp2.sh` now use 1.71.0. Rebuilding is not required: no security advisory lies between 1.68.1 and 1.71.0, and the library still compiles against 1.61.0 or later. A program that stays on 1.68.1 keeps working; it is no longer what the tests run with.
-- **Interceptors** are new ([interceptors.md](interceptors.md)). A program that adds none behaves as before.
-- **chronos: closing a connection** now ends our side first and waits for the peer to end its side, one second at most (and one mebibyte of what the peer still sends), before the socket is closed. A peer that reads its end of stream and closes, as gRPC clients and servers do, sees no difference in time; `AsyncChannel.close` and `AsyncGrpcServer.stop` can take up to a second longer with a peer that never closes its side. `stop` closes all connections at once, so the second is not per connection.
+- **BearSSL**: the two fixes the upstream made in April 2026 (the length check of CBC records, and the decoders of certificates and keys that went on after an error) are in `bearssl` 0.3.1, the lowest version this library accepts. The library offers no CBC suite, and loads certificates and keys only from what the program passes to it, so neither was reachable from the network.
+- Nothing else changes in behaviour.
 
 ## 0.5.1
 

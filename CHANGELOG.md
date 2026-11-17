@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-11-17
+
 ### Added
 - Interceptors: code that runs around every call, for authentication by metadata, logging and metrics in one place. `addInterceptor` on a server (`GrpcServer`, `AsyncGrpcServer`) and on a channel (`GrpcChannel`, `AsyncChannel`). A server interceptor sees the path, the metadata and the deadline of a call to a registered method before its request is decoded, may set response metadata, and either lets the call proceed or refuses it with a status; after the handler it sees what the handler raised. A client interceptor may change the metadata and the deadline of every `unaryCall` and `newCall` on the channel, those of generated clients included, and sees the outcome of a unary call. Interceptors see no messages. An interceptor that swallows the error of a call does not turn it into OK. With no interceptor added nothing changes. How to: [docs/interceptors.md](docs/interceptors.md); example: `examples/interceptors.nim`. Tests: `tests/tinterceptors.nim`.
 
