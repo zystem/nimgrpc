@@ -215,6 +215,10 @@ const receiveWindow* = 1024 * 1024
 
 proc newSession(server, manualFlow: bool; maxStreams: int): H2Session =
   result = H2Session()
+  # A Table allocates 64 slots at its first insert; a connection usually has a few streams.
+  result.inHeaders = initTable[int32, seq[Header]](4)
+  result.inData = initTable[int32, seq[byte]](4)
+  result.outs = initTable[int32, OutStream](4)
   var cbs: ptr Nghttp2SessionCallbacks
   if nghttp2_session_callbacks_new(cbs.addr) != 0:
     raise newException(H2Error, "nghttp2_session_callbacks_new failed")

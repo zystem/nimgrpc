@@ -437,4 +437,4 @@ Measured on Linux x86-64, glibc, `-d:release`:
   keeps the heap of a thread that exits while memory it allocated is still in
   use elsewhere.
 - chronos server, one thread: 40 MiB RSS with 1,000 connections each holding
-  an open call, 190 MiB with 5,000 (about 38 KiB per connection).
+  an open call, 142 MiB with 5,000 (about 28 KiB per connection).

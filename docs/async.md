@@ -128,14 +128,16 @@ or `blocking,async` for both. With `async` a service `S` gets
 Linux x86-64, `-d:release`, one thread (`tools/asyncload.nim`):
 
 - Server RSS with 1,000 connections, each with a bidirectional call open:
-  40 MiB; with 5,000: 190 MiB. About 38 KiB per connection with an open call,
+  30 MiB; with 5,000: 142 MiB. About 28 KiB per connection with an open call
+  (38 KiB before the per-connection tables were made small, 2026-11-18),
   of which about 9 KiB is the nghttp2 session and 4 KiB chronos' read buffer.
-  With TLS about 75 KiB (BearSSL's two 16 KiB record buffers live in each
+  With TLS about 75 KiB, measured before that change and not repeated (BearSSL's two 16 KiB record buffers live in each
   connection). `.github/workflows/soak.yml` repeats the measurement each week
   (`tools/soak.sh`, plain and TLS) and fails when it passes 60 and 100 KiB, or when
   the server's memory or descriptors grow during connection churn.
 - Where it goes (heaptrack, `tools/profile.sh`, weekly in `.github/workflows/profile.yml`;
-  1000 held connections, peak heap about 41 KiB each without TLS): 16 KiB is nghttp2's frame
+  1000 held connections, peak heap about 41 KiB each without TLS, taken before the
+  per-connection tables were made small, which took about 10 KiB off): 16 KiB is nghttp2's frame
   buffer, allocated with each session whether or not it is used; about 12 KiB is Nim
   sequences (read and write buffers and queues); about 5 KiB Nim objects (futures, streams,
   the connection); 2.8 KiB the nghttp2 session itself; 1 KiB each for the HPACK encoder

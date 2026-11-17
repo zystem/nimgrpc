@@ -491,7 +491,7 @@ proc lifecycleLoop(c: AsyncH2Conn) {.async: (raises: []).} =
 
 proc newConn(transp: StreamTransport; sess: H2Session; server: AsyncH2Server;
              ka: Keepalive): AsyncH2Conn =
-  AsyncH2Conn(transp: transp, sess: sess, server: server, ka: ka,
+  AsyncH2Conn(transp: transp, sess: sess, server: server, ka: ka, streams: initTable[int32, AsyncH2Stream](4),
               outQ: initDeque[seq[byte]](), writeEv: newAsyncEvent(),
               closedEv: newAsyncEvent(), lastRead: Moment.now(), created: Moment.now(), activity: Moment.now())
 
