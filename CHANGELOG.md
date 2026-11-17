@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- Less memory per connection on the chronos server: the tables of open streams start with 4 slots instead of 64. A server with 1,000 connections, each with a call open, holds 30 MiB instead of 40 (38 KiB to 28 KiB per connection; 5,000: 142 MiB instead of 191). Measured on 2026-11-18, plain HTTP/2; TLS not measured.
+
 ## 0.6.0 — 2026-11-17
 
 ### Added
