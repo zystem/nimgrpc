@@ -10,10 +10,19 @@
 ## by the connection that owns it under that connection's lock.
 
 import std/os
-import bearssl/abi/[bearssl_ssl, bearssl_x509, bearssl_pem, bearssl_ec,
-                    bearssl_rsa, bearssl_hash, bearssl_rand]
 
-{.compile: currentSourcePath.parentDir / "gtls.c".}
+when defined(tlsMbed):
+  ## The prototype backend: mbedTLS 4.x, TLS 1.2 and 1.3 (gtls_mbed.c). Build it with
+  ## tools/build-mbedtls.sh and compile with -d:tlsMbed; -d:mbedtlsPrefix says where it is.
+  const mbedtlsPrefix* {.strdefine.} = "/opt/mbedtls"
+  {.passc: "-I" & mbedtlsPrefix & "/include".}
+  {.passl: mbedtlsPrefix & "/lib/libmbedtls.a " & mbedtlsPrefix & "/lib/libmbedx509.a " &
+           mbedtlsPrefix & "/lib/libtfpsacrypto.a -lpthread".}
+  {.compile: currentSourcePath.parentDir / "gtls_mbed.c".}
+else:
+  import bearssl/abi/[bearssl_ssl, bearssl_x509, bearssl_pem, bearssl_ec,
+                      bearssl_rsa, bearssl_hash, bearssl_rand]
+  {.compile: currentSourcePath.parentDir / "gtls.c".}
 
 type
   GtlsConfP = distinct pointer   ## gtls_conf*, opaque
@@ -48,6 +57,8 @@ proc gtls_alpn(t: GtlsConnP): cstring
 proc gtls_peer_ok(t: GtlsConnP): cint
 proc gtls_resumed(t: GtlsConnP): cint
 proc gtls_alpn_refused(t: GtlsConnP): cint
+when defined(tlsMbed):
+  proc gtls_error_text(t: GtlsConnP): cstring
 {.pop.}
 
 const
@@ -186,6 +197,8 @@ proc errorMessage*(t: TlsConn): string =
   of 56: "TLS: server name does not match the certificate"
   of 62: "TLS: certificate not signed by a trusted CA"
   else:
+    when defined(tlsMbed):
+      if e == 1: return "TLS: " & $gtls_error_text(t.raw)
     if e >= 512: "TLS: sent fatal alert " & $(e - 512)
     elif e >= 256: "TLS: peer sent fatal alert " & $(e - 256)
     else: "TLS error " & $e
