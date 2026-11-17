@@ -51,7 +51,8 @@ failures marked **(run)** happen and compares the text.
 | `connection closed: REASON`, `closed`, `read error`, `session finished` | The connection ended: by `close`, by a socket error, or by an HTTP/2 error. | Call again; the channel dials a new connection. |
 | `channel closed` **(run)** | The call was made on a channel after its `shutdown` (blocking), or after `close` of a chronos channel. A blocking channel must not be used at all after `close`: it is freed. | Dial a new channel. |
 | `stream reset with HTTP/2 error 7 (REFUSED_STREAM)` | The server did not start the call: over `maxConcurrentStreams`, or it is stopping. `e.unprocessed` is true. | Safe to send again; `unaryCall` already did, twice. Open fewer calls at once or raise the limit. |
-| `stream reset with HTTP/2 error N` | The peer reset the call; `N` is the HTTP/2 error code (8: cancelled, 11: ENHANCE_YOUR_CALM). | 8 from a server of this library: `Limits.maxCallMs` passed, or the server stopped. |
+| `handshake not completed in N ms` (client side: the call fails with UNAVAILABLE) | The server accepted the TCP connection and did not finish TLS and send its first SETTINGS within `ClientLimits.handshakeTimeoutMs` (20 s). | A server that is stuck, a port that belongs to another program, or a firewall that accepts and drops. Raise the limit only for a very slow link. |
+| `stream reset with HTTP/2 error N` | The peer reset the call; `N` is the HTTP/2 error code (8: cancelled, 11: ENHANCE_YOUR_CALM). | 8 from a server of this library: `Limits.maxCallMs` passed, or the server stopped. 2 (INTERNAL_ERROR) sent by a client of this library: the response headers or trailers weighed more than `ClientLimits.maxHeaderListBytes` (64 KiB). |
 
 ## Calls
 

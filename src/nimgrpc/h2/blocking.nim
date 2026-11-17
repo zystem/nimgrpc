@@ -22,7 +22,7 @@ import std/[locks, net, tables, deques, os, posix, atomics, options, nativesocke
 import ./session, ./common, ./tcpopts, ../tls/tls, ../cleanup, ../bytebuf
 
 export session.Header, session.H2Error, net.Port, tls, common.H2Timeout,
-       common.H2StreamClosed, common.Keepalive, common.PingPolicy, common.Limits
+       common.H2StreamClosed, common.Keepalive, common.PingPolicy, common.Limits, common.ClientLimits
 
 type
   DrainState = enum
@@ -72,7 +72,7 @@ type
     policy: PingPolicy
     lastReadNs: int64     ## monotonic time of the last bytes read
     createdNs: int64      ## monotonic time the connection was made
-    handshakeNs: int64    ## server: how long the peer has to send its first SETTINGS; 0 for no limit
+    handshakeNs: int64    ## how long the peer has to send its first SETTINGS; 0 for no limit
     maxIdleNs: int64      ## server: `Limits.maxConnectionIdleMs` in ns; 0 for no limit
     ageDueNs: int64       ## server: when the connection is old (monotonic), 0 for never
     graceNs: int64        ## server: `Limits.maxConnectionAgeGraceMs` in ns; 0 waits for ever
@@ -500,6 +500,7 @@ proc readerLoop(c: ptr ConnObj) =
           c.pumpTlsInLocked()
         c.handleEventsLocked()
         c.queueOutputLocked()
+        c.handleEventsLocked()   # a stream nghttp2 reset while framing its RST_STREAM is closed now
         if not c.sess.wantRead() and not c.sess.wantWrite() and c.outQ.len == 0:
           c.failLocked("session finished")
       except CatchableError as e:
@@ -512,10 +513,10 @@ proc readerLoop(c: ptr ConnObj) =
       if stop: break
 
 proc handshakeLocked(c: ptr ConnObj): int =
-  ## Server: closes a connection whose peer has not sent its first SETTINGS (the TLS handshake
+  ## Closes a connection whose peer has not sent its first SETTINGS (the TLS handshake
   ## and the HTTP/2 preface are behind that) in time. Returns how long to wait (ms) before
   ## looking again, or -1 when there is nothing to watch.
-  if c.server == nil or c.handshakeNs <= 0 or c.closed or c.sess.gotPeerSettings: return -1
+  if c.handshakeNs <= 0 or c.closed or c.sess.gotPeerSettings: return -1
   let left = c.createdNs + c.handshakeNs - nowNs()
   if left <= 0:
     c.failLocked("handshake not completed in " & $(c.handshakeNs div 1_000_000) & " ms")
@@ -1327,7 +1328,8 @@ const defaultConnectTimeoutMs* = 20_000
   ## How long `dial` waits for each address to accept the TCP connection.
 
 proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
-           keepalive = Keepalive(); connectTimeoutMs = defaultConnectTimeoutMs): Conn =
+           keepalive = Keepalive(); connectTimeoutMs = defaultConnectTimeoutMs;
+           limits = ClientLimits()): Conn =
   ## Without `tls`: HTTP/2 with prior knowledge (h2c). With it: TLS 1.2,
   ## ALPN h2, the server's certificate checked against `serverName` (default:
   ## `host`; an IP address is matched with the certificate's iPAddress entries). A failed handshake shows up as an error on the
@@ -1337,7 +1339,8 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   ## covered: it blocks for as long as the resolver takes.
   let sock = connectAny(host, port, connectTimeoutMs)
   setTcpKeepalive(sock.getFd, keepalive.tcpSecs)
-  result = newConn(sock, newClientSession(manualFlow = true), nil)
+  result = newConn(sock, newClientSession(true, limits.maxHeaderListBytes), nil)
+  result.handshakeNs = limits.handshakeTimeoutMs.int64 * 1_000_000
   result.ka = keepalive
   if tls != nil:
     result.tls = newClientTls(tls, if serverName.len > 0: serverName else: host)

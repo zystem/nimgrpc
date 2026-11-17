@@ -19,7 +19,7 @@ import pkg/chronos
 import ./session, ./common, ./tcpopts, ../tls/tls, ../bytebuf
 
 export session.Header, session.H2Error, tls, common.H2Timeout,
-       common.H2StreamClosed, common.Keepalive, common.PingPolicy, common.Limits
+       common.H2StreamClosed, common.Keepalive, common.PingPolicy, common.Limits, common.ClientLimits
 
 const
   closeLingerMs = 1000
@@ -78,7 +78,7 @@ type
     lastRead: Moment
     created: Moment
     activity: Moment           ## server: when a call last began or ended
-    handshakeMs: int           ## server: how long the peer has to send its first SETTINGS; 0 for no limit
+    handshakeMs: int           ## how long the peer has to send its first SETTINGS; 0 for no limit
     maxAgeMs, maxIdleMs, graceMs: int   ## server: `Limits.maxConnection...Ms`; 0 for no limit
     pingOutstanding: bool
     pingSent: Moment
@@ -303,6 +303,7 @@ proc onBytes(c: AsyncH2Conn; data: openArray[byte]) =
       c.pumpTlsIn()
     c.handleEvents()
     c.queueOutput()
+    c.handleEvents()   # a stream nghttp2 reset while framing its RST_STREAM is closed now
     c.checkFinished()
   except CatchableError as e:
     # A connection error: nghttp2 has queued a GOAWAY; send it, then stop.
@@ -417,7 +418,7 @@ proc pingerLoop(c: AsyncH2Conn) {.async: (raises: []).} =
       break
 
 proc handshakeGuard(c: AsyncH2Conn) {.async: (raises: []).} =
-  ## Server: closes a connection whose peer has not sent its first SETTINGS (the TLS handshake
+  ## Closes a connection whose peer has not sent its first SETTINGS (the TLS handshake
   ## and the HTTP/2 preface are behind that) within `handshakeMs`.
   let limit = c.created + c.handshakeMs.milliseconds
   while not c.closed and not c.sess.gotPeerSettings:
@@ -757,8 +758,8 @@ const defaultConnectTimeoutMs* = 20_000
   ## How long `dial` waits for each address to accept the TCP connection.
 
 proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
-           keepalive = Keepalive(); connectTimeoutMs = defaultConnectTimeoutMs):
-          Future[AsyncH2Conn] {.async.} =
+           keepalive = Keepalive(); connectTimeoutMs = defaultConnectTimeoutMs;
+           limits = ClientLimits()): Future[AsyncH2Conn] {.async.} =
   ## Without `tls`: HTTP/2 with prior knowledge (h2c). With it: TLS 1.2,
   ## ALPN h2, the server's certificate checked against `serverName` (default
   ## `host`). A failed handshake shows up as an error on the first stream.
@@ -770,7 +771,8 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   if addrs.len == 0: raise newException(TransportError, "cannot resolve " & host)
   let transp = await connectEyeballs(addrs, connectTimeoutMs)
   setTcpKeepalive(cint(transp.fd), keepalive.tcpSecs)
-  let c = newConn(transp, newClientSession(manualFlow = true), nil, keepalive)
+  let c = newConn(transp, newClientSession(true, limits.maxHeaderListBytes), nil, keepalive)
+  c.handshakeMs = limits.handshakeTimeoutMs
   if tls != nil:
     try:
       c.tls = newClientTls(tls, if serverName.len > 0: serverName else: host)

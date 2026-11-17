@@ -51,6 +51,14 @@ measured in a large deployment ([security-requirements.md](security-requirements
 - [ ] Handlers raise `GrpcError` with a text meant for the client. Other exceptions become
       `internal error`, which is right: do not send their text yourself.
 
+## Limits (a client that dials servers you do not run)
+
+Set by default; `ClientLimits` goes to `dial` and `dialAsync`.
+
+- [ ] `ClientLimits.handshakeTimeoutMs` (20 s): a server that accepts and stays silent is dropped, and its calls fail with UNAVAILABLE. 0 means no limit: a call without a deadline would then wait for ever.
+- [ ] `ClientLimits.maxHeaderListBytes` (64 KiB): the most one block of response headers or trailers may weigh; past it the call fails and the connection stays. 0 leaves only nghttp2's own limits.
+- [ ] `maxMessage` (4 MiB) bounds a message after decompression; set a deadline (`timeoutMs`) on every call.
+
 ## Limits (a server that untrusted clients reach)
 
 **Dangerous when left at the default**: these are off (0, no limit) unless set.
