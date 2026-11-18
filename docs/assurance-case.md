@@ -31,7 +31,7 @@ Why the security requirements of [security-requirements.md](security-requirement
 | Weakness | Counter | Evidence |
 |---|---|---|
 | Malformed input (CWE-20) | nghttp2 for frames; checked lengths in framing and Protobuf; errors become statuses | `tests/tgrpc.nim`, `tests/tcodec.nim`, `tests/th2session.nim`, h2spec ([h2spec.md](h2spec.md)) |
-| Memory errors (CWE-119, 416) | Nim with ORC; sanitizers on the whole suite; a weekly mutation fuzzer over the parsers | `nimble asan` on every change, `nimble tsan` nightly, `tools/fuzz.nim` weekly |
+| Memory errors (CWE-119, 416) | Nim with ORC; sanitizers on the whole suite; a weekly mutation fuzzer and a weekly coverage-guided one (libFuzzer) over the parsers | `nimble asan` on every change, `nimble tsan` nightly, `tools/fuzz.nim` and `tools/libfuzz.nim` weekly |
 | Resource exhaustion (CWE-400, 409) | `maxMessage`, decompression cap, flow control, deadlines, keepalive | `tests/tasynch2.nim` (a reader that does not read stops the sender), `tests/tkeepalive.nim`, `tests/tgrpc.nim` |
 | Weak transport security (CWE-319, 295) | TLS with certificate verification, mTLS | `tests/ttls.nim` |
 | Vulnerable components | Dependabot for the actions, Dependency Review, review of nghttp2/BearSSL/zlib releases | [security-policies.md](security-policies.md) |
@@ -43,4 +43,4 @@ Static musl builds are possible ([static-build.md](static-build.md)); no run-tim
 
 ## 6. Gaps (known)
 
-Single maintainer (no second reviewer); fuzzing is a mutation fuzzer, not coverage-guided (see [roadmap.md](roadmap.md)); no static analysis tool for Nim beyond the compiler's warnings; no code-coverage measurement; the number of concurrent streams is not limited by the library. A gap is a reason to read [threat-model.md](threat-model.md), not a hidden risk.
+Single maintainer (no second reviewer); the coverage-guided fuzzer instruments our code, not nghttp2 or zlib as linked, and has no target for the client session or TLS records (see [roadmap.md](roadmap.md)); no static analysis tool for Nim beyond the compiler's warnings; no code-coverage measurement; `Limits.maxConnections` and `maxConnectionsPerIp` are off by default. A gap is a reason to read [threat-model.md](threat-model.md), not a hidden risk.

@@ -11,19 +11,13 @@
 ## GrpcError, H2Error) are fine; anything else, a crash, a sanitizer report or
 ## a hang, is a finding. The input being run is kept in OUTDIR/current-TARGET.bin,
 ## so after a crash it is the reproducer. Build with the sanitizers (tools/fuzz.sh).
-## This is not coverage-guided: it finds shallow bugs and regressions, and it is
-## the reason the parsers have no known crash; a coverage-guided fuzzer
-## (libFuzzer, ClusterFuzzLite) is on the roadmap.
+## This is not coverage-guided: it finds shallow bugs and regressions. The coverage-guided
+## fuzzer over the same targets is tools/libfuzz.nim (tools/libfuzz.sh).
+##
+##   fuzz seeds TARGET DIR     writes the seeds of TARGET as files, a starting corpus for libFuzzer
 
 import std/[os, strutils, random, times]
-import nimgrpc/[wire, status, protobuf]
-import nimgrpc/compress/gzip
-import nimgrpc/h2/session
-import ../tests/gen/[codec_pb, legacy_pb, wkt_use_pb]
-
-const protoDir = currentSourcePath.parentDir.parentDir / "tests" / "proto"
-
-proc bytesOf(s: string): seq[byte] = @(s.toOpenArrayByte(0, s.high))
+import ./fuzztargets
 
 proc mutate(rng: var Rand; seed: seq[byte]): seq[byte] =
   result = seed
@@ -56,95 +50,6 @@ proc mutate(rng: var Rand; seed: seq[byte]): seq[byte] =
       result.add byte(rng.rand(255))
     if result.len > 1 shl 20: result.setLen(1 shl 20)
 
-# ------------------------------------------------------------------ targets
-
-proc tFrames(d: seq[byte]) =
-  ## Frames fed in chunks of varying size, as they arrive.
-  var m: MsgBuf
-  var payload: seq[byte]
-  var compressed: bool
-  var i = 0
-  try:
-    while i < d.len:
-      let k = min(d.len - i, 1 + int(d[i]) mod 64 * 7)
-      var chunk = d[i ..< i + k]
-      i += k
-      m.feed(chunk)
-      while m.take(4096, payload, compressed): discard
-  except GrpcError: discard
-
-proc tGzip(d: seq[byte]) =
-  try: discard gzipDecompress(d, 1 shl 20)
-  except GrpcError: discard
-
-proc tEverything(d: seq[byte]) =
-  try: discard Everything.decode(d)
-  except ProtobufError: discard
-
-proc tLegacy(d: seq[byte]) =
-  try: discard Legacy.decode(d)
-  except ProtobufError: discard
-
-proc tWkt(d: seq[byte]) =
-  try: discard Event.decode(d)
-  except ProtobufError: discard
-
-var splitAt = 0   ## set by the driver: where the h2 input is cut into two reads
-
-proc tH2Server(d: seq[byte]) =
-  let s = newServerSession()
-  try:
-    let cut = if d.len == 0: 0 else: splitAt mod (d.len + 1)
-    s.recv(d[0 ..< cut])
-    discard s.takeEvents()
-    discard s.takeOutput()
-    s.recv(d[cut .. ^1])
-    for ev in s.takeEvents():
-      if ev.kind == evHeaders:
-        discard s.takeOutput()
-    discard s.takeOutput()
-  except H2Error: discard
-
-# ------------------------------------------------------------------- seeds
-
-proc framed(msg: seq[byte]; flag = 0'u8): seq[byte] =
-  result = @[flag, byte(msg.len shr 24), byte(msg.len shr 16), byte(msg.len shr 8), byte(msg.len)]
-  result.add msg
-
-proc h2ClientBytes(): seq[seq[byte]] =
-  ## What real clients send: preface, SETTINGS, a request, a body, a reset.
-  let c = newClientSession()
-  let id = c.submitRequest(@[(":method", "POST"), (":scheme", "http"),
-                             (":authority", "fuzz"), (":path", "/f.F/Call"),
-                             ("content-type", "application/grpc"), ("te", "trailers")])
-  c.sendData(id, framed(@[1'u8, 2, 3, 4]), endStream = false)
-  var first = c.takeOutput()
-  result.add first
-  c.sendData(id, framed(bytesOf("more")), endStream = true)
-  var second = c.takeOutput()
-  result.add first & second
-  c.resetStream(id)
-  result.add first & second & c.takeOutput()
-  result.add c.takeOutput()
-
-proc nestedGroups(n: int): seq[byte] =
-  ## n nested unknown groups (field 1000), closed: the shape of a stack-depth attack.
-  for i in 0 ..< n: result.add [0xC3'u8, 0x3E]
-  for i in 0 ..< n: result.add [0xC4'u8, 0x3E]
-
-proc seedsFor(target: string): seq[seq[byte]] =
-  let every = bytesOf(readFile(protoDir / "everything.bin"))
-  case target
-  of "frames":
-    result = @[framed(every), framed(every, 1) & framed(@[]), framed(@[1'u8]) & framed(@[2'u8, 3])]
-  of "gzip":
-    result = @[gzipCompress(every), gzipCompress(newSeq[byte](5000)), gzipCompress(@[])]
-  of "everything": result = @[every, @[], nestedGroups(99), nestedGroups(101)]
-  of "legacy": result = @[bytesOf(readFile(protoDir / "legacy.bin")), @[]]
-  of "wkt": result = @[bytesOf(readFile(protoDir / "wkt.bin")), @[]]
-  of "h2server": result = h2ClientBytes()
-  else: quit "unknown target " & target
-
 proc run(target: string; seconds: int; seed: int64; outDir: string) =
   var rng = initRand(seed)
   let seeds = seedsFor(target)
@@ -173,6 +78,13 @@ proc run(target: string; seconds: int; seed: int64; outDir: string) =
   echo target, ": ", rounds, " inputs, no finding (seed ", seed, ")"
 
 when isMainModule:
+  if paramCount() == 3 and paramStr(1) == "seeds":
+    createDir paramStr(3)
+    for i, sd in seedsFor(paramStr(2)):
+      # the h2 target reads the first two bytes as the place where its input is cut in two
+      let body = if paramStr(2) == "h2server": @[0'u8, 0] & sd else: sd
+      writeFile(paramStr(3) / ("seed" & $i), cast[string](body))
+    quit 0
   if paramCount() < 2: quit "usage: see the top of tools/fuzz.nim"
   let target = paramStr(1)
   let secs = parseInt(paramStr(2))
