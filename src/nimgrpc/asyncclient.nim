@@ -14,7 +14,7 @@ import std/[strutils, options]
 import pkg/chronos
 import ./status, ./wire, ./h2/async, ./h2/common, ./compress/gzip
 export status, options, async.TlsConfig, async.tlsClientConfig, async.TlsError,
-       async.Keepalive, async.CipherOrder, async.setCipherOrder, async.setSessionLifetime, async.defaultSessionLifetime
+       async.Keepalive, async.ClientLimits, async.CipherOrder, async.setCipherOrder, async.setSessionLifetime, async.defaultSessionLifetime
 
 const userAgent = "grpc-nim/0.0.1"
 
@@ -25,6 +25,7 @@ type
     tls*: TlsConfig
     serverName*: string
     keepalive: Keepalive
+    limits: ClientLimits
     connectTimeoutMs: int
     authority: string
     scheme: string
@@ -89,7 +90,7 @@ proc connect(ch: AsyncChannel): Future[AsyncH2Conn] {.
   var why = ""
   try:
     return await async.dial(ch.host, Port(ch.port), ch.tls, ch.serverName, ch.keepalive,
-                             ch.connectTimeoutMs)
+                             ch.connectTimeoutMs, ch.limits)
   except CancelledError as e:
     raise e
   except CatchableError as e:
@@ -98,15 +99,18 @@ proc connect(ch: AsyncChannel): Future[AsyncH2Conn] {.
 
 proc dialAsync*(host: string; port: int; tls: TlsConfig = nil; serverName = "";
                 keepalive = Keepalive();
-                connectTimeoutMs = async.defaultConnectTimeoutMs): Future[AsyncChannel] {.async.} =
+                connectTimeoutMs = async.defaultConnectTimeoutMs;
+                limits = ClientLimits()): Future[AsyncChannel] {.async.} =
   ## Without `tls`: plaintext HTTP/2 (h2c). With it: TLS 1.2 with ALPN h2,
   ## the server certificate checked against `serverName` (default `host`).
   ## Connects right away and raises GrpcError(UNAVAILABLE) if the server
   ## cannot be reached; later connections are made on demand. Each attempt
   ## to connect gets `connectTimeoutMs` (20 s by default; negative: no limit
-  ## beyond the system's) and fails with UNAVAILABLE past it.
+  ## beyond the system's) and fails with UNAVAILABLE past it. `limits` (see `ClientLimits`)
+  ## bounds how long a server may stay silent after the TCP connection and how large its
+  ## headers may be.
   let ch = AsyncChannel(host: host, port: port, tls: tls, serverName: serverName,
-                        keepalive: keepalive, connectTimeoutMs: connectTimeoutMs,
+                        keepalive: keepalive, limits: limits, connectTimeoutMs: connectTimeoutMs,
                         authority: hostPort(if serverName.len > 0: serverName else: host, port),
                         scheme: if tls != nil: "https" else: "http")
   ch.conn = await ch.connect()

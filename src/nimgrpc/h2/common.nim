@@ -77,6 +77,19 @@ type
       ## Together with `maxStreamBuffer` this bounds what a peer that does not
       ## read can make us hold. 0 means no limit beyond `maxStreamBuffer`.
 
+  ClientLimits* = object
+    ## What a client accepts from the server it dials; the defaults suit most programs.
+    handshakeTimeoutMs*: int = 20_000
+      ## A connection whose server has not completed the TLS handshake and sent its first
+      ## SETTINGS this long after the TCP connection was made is closed, and the calls on it
+      ## fail with UNAVAILABLE. Without it a server that accepts and stays silent holds a call
+      ## that has no deadline for ever. 0 means no limit.
+    maxHeaderListBytes*: int = 64 * 1024
+      ## The most one block of headers (the response headers, or the trailers) of a call may
+      ## weigh: the names and values in bytes plus 32 for each header, as HTTP/2 counts it. It
+      ## is announced to the server as SETTINGS_MAX_HEADER_LIST_SIZE; a server that goes past
+      ## it gets the stream reset and the call fails. 0 means no limit beyond nghttp2's own.
+
 const
   readChunk* = 16 * 1024
   maxOutQueue* = 256 * 1024        ## bytes framed and waiting for the socket

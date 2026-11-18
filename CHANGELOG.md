@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- `ClientLimits` for `dial` and `dialAsync` (blocking and chronos): `handshakeTimeoutMs` (20 s by default) closes a connection whose server accepted the TCP connection and does not finish TLS and send its first SETTINGS (before, a call with no deadline waited for ever); `maxHeaderListBytes` (64 KiB by default) resets a call whose response headers or trailers weigh more. `tests/tclientlimits.nim`.
+
+### Fixed
+- A stream that nghttp2 reset while the session framed the RST_STREAM (a callback that fails, on a connection with nothing more to read) was reported closed only when the next bytes arrived, so a call could wait for ever. The reader looks at the session's events again after it has queued the output, on both adapters.
+
 ### Changed
 - Less memory per connection on the chronos server: the tables of open streams start with 4 slots instead of 64. A server with 1,000 connections, each with a call open, holds 30 MiB instead of 40 (38 KiB to 28 KiB per connection; 5,000: 142 MiB instead of 191). Measured on 2026-11-18, plain HTTP/2; TLS not measured.
 

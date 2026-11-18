@@ -18,7 +18,7 @@
 import std/[strutils, locks, atomics, os, monotimes, times]
 import ./status, ./wire, ./h2/blocking, ./h2/common, ./compress/gzip, ./cleanup
 export status, blocking.TlsConfig, blocking.tlsClientConfig, blocking.tlsServerConfig,
-       blocking.TlsError, blocking.Keepalive, blocking.CipherOrder,
+       blocking.TlsError, blocking.Keepalive, blocking.ClientLimits, blocking.CipherOrder,
        blocking.setCipherOrder, blocking.setSessionLifetime, blocking.defaultSessionLifetime, blocking.share
 
 const userAgent = "grpc-nim/0.0.1"
@@ -31,6 +31,7 @@ type
     tls*: TlsConfig
     serverName*: string
     keepalive: Keepalive
+    limits: ClientLimits
     connectTimeoutMs: int
     authority: string
     scheme: string
@@ -122,14 +123,15 @@ proc connect(c: ptr ChannelObj): Conn =
   var why = ""
   try:
     result = blocking.dial(c.host, Port(c.port), c.tls, c.serverName, c.keepalive,
-                           c.connectTimeoutMs)
+                           c.connectTimeoutMs, c.limits)
   except CatchableError as e:
     why = e.msg
   if why.len > 0: raise newGrpcError(scUnavailable, why)
 
 proc dial*(host: string; port: int; tls: TlsConfig = nil; serverName = "";
            keepalive = Keepalive();
-           connectTimeoutMs = blocking.defaultConnectTimeoutMs): GrpcChannel =
+           connectTimeoutMs = blocking.defaultConnectTimeoutMs;
+           limits = ClientLimits()): GrpcChannel =
   ## `host` is a name or an address, IPv4 or IPv6 ("::1" or "[::1]"); a name is tried at
   ## every address it resolves to, IPv6 ones included, in the resolver's order.
   ## Without `tls`: plaintext HTTP/2 (h2c) with prior knowledge. With it:
@@ -140,7 +142,9 @@ proc dial*(host: string; port: int; tls: TlsConfig = nil; serverName = "";
   ## GrpcError(UNAVAILABLE) if the server cannot be reached; a failed
   ## handshake is reported by the first call. Later connections are made on
   ## demand. Each attempt to connect gets `connectTimeoutMs` (20 s by default;
-  ## negative: no limit beyond the system's) and fails with UNAVAILABLE past it.
+  ## negative: no limit beyond the system's) and fails with UNAVAILABLE past it. `limits` (see
+  ## `ClientLimits`) bounds how long a server may stay silent after the TCP connection and how
+  ## large its headers may be.
   let c = createShared(ChannelObj)
   initLock(c.lock)
   c.host = host
@@ -148,6 +152,7 @@ proc dial*(host: string; port: int; tls: TlsConfig = nil; serverName = "";
   c.tls = tls.share      # the channel's own object over the configuration: `close` may run on another thread than the one that dialled, and the user's object is then not touched by two threads
   c.serverName = serverName
   c.keepalive = keepalive
+  c.limits = limits
   c.connectTimeoutMs = connectTimeoutMs
   c.authority = hostPort(if serverName.len > 0: serverName else: host, port)
   c.scheme = if tls != nil: "https" else: "http"

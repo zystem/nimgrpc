@@ -59,6 +59,8 @@ type
     inData: Table[int32, seq[byte]]
     outs: Table[int32, OutStream]
     queued: int        ## body bytes in `outs` that nghttp2 has not framed yet
+    maxHeaderBytes: int ## client: the most one header block may weigh; 0 for no limit
+    headerBytes: int    ## what the header block being read weighs so far
     peerSettings: bool ## the peer's first SETTINGS frame has arrived: its preface is done
     failure: string    ## first error seen inside a callback
   H2Session* = ref H2SessionObj
@@ -92,12 +94,17 @@ proc onBeginHeaders(session: ptr Nghttp2Session; frame: ptr Nghttp2Frame;
                     userData: pointer): cint {.cdecl, raises: [].} =
   let s = sess(userData)
   s.inHeaders[frame.hd.stream_id] = @[]
+  s.headerBytes = 0
   0
 
 proc onHeader(session: ptr Nghttp2Session; frame: ptr Nghttp2Frame;
               name: ptr uint8; namelen: csize_t; value: ptr uint8; valuelen: csize_t;
               flags: uint8; userData: pointer): cint {.cdecl, raises: [].} =
   let s = sess(userData)
+  if s.maxHeaderBytes > 0:
+    s.headerBytes += namelen.int + valuelen.int + 32
+    if s.headerBytes > s.maxHeaderBytes:
+      return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE   # nghttp2 resets this stream only
   s.inHeaders.mgetOrPut(frame.hd.stream_id, @[]).add(
     (toString(name, namelen), toString(value, valuelen)))
   0
@@ -213,8 +220,8 @@ const receiveWindow* = 1024 * 1024
   ## What a peer may send us per stream, and per connection, before we credit
   ## it again; also the most a stream's unread data can grow to.
 
-proc newSession(server, manualFlow: bool; maxStreams: int): H2Session =
-  result = H2Session()
+proc newSession(server, manualFlow: bool; maxStreams: int; maxHeaderBytes = 0): H2Session =
+  result = H2Session(maxHeaderBytes: maxHeaderBytes)
   # A Table allocates 64 slots at its first insert; a connection usually has a few streams.
   result.inHeaders = initTable[int32, seq[Header]](4)
   result.inData = initTable[int32, seq[byte]](4)
@@ -245,19 +252,23 @@ proc newSession(server, manualFlow: bool; maxStreams: int): H2Session =
   if rv != 0: raiseH2(rv, "session_new")
   # The default window of 64 KiB makes a large message wait for the peer's
   # WINDOW_UPDATE every 64 KiB, each a round trip of threads and syscalls.
-  var iv: array[2, tuple[id: int32, value: uint32]]
+  var iv: array[3, tuple[id: int32, value: uint32]]
   iv[0] = (4'i32, receiveWindow.uint32)           # SETTINGS_INITIAL_WINDOW_SIZE
   var nIv = 1
   if maxStreams > 0:
     iv[1] = (3'i32, maxStreams.uint32)            # SETTINGS_MAX_CONCURRENT_STREAMS
     nIv = 2
+  if maxHeaderBytes > 0:
+    iv[nIv] = (6'i32, maxHeaderBytes.uint32)      # SETTINGS_MAX_HEADER_LIST_SIZE
+    inc nIv
   let rs = nghttp2_submit_settings(result.raw, NGHTTP2_FLAG_NONE, iv.addr, nIv.csize_t)
   if rs != 0: raiseH2(rs, "submit_settings")
   let rw = nghttp2_submit_window_update(result.raw, NGHTTP2_FLAG_NONE, 0,
                                         (receiveWindow - 65535).int32)
   if rw != 0: raiseH2(rw, "window_update")
 
-proc newClientSession*(manualFlow = false): H2Session = newSession(false, manualFlow, 0)
+proc newClientSession*(manualFlow = false; maxHeaderListBytes = 0): H2Session =
+  newSession(false, manualFlow, 0, maxHeaderListBytes)
 proc newServerSession*(manualFlow = false; maxConcurrentStreams = 0): H2Session =
   ## With `maxConcurrentStreams` > 0 the server announces that limit.
   ## With `manualFlow` nghttp2 sends no WINDOW_UPDATE by itself: the peer's
