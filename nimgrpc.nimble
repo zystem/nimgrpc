@@ -42,7 +42,7 @@ task lint, "Style (NEP-1) and warnings: nothing may be reported":
                 "src/nimgrpc/typed.nim", "src/nimgrpc/wkt.nim",
                 "src/protoc_gen_nim.nim"]
   for t in tests: files.add t
-  for t in ["asyncbench", "asyncload", "fuzz", "h2specasync", "h2specserver",
+  for t in ["asyncbench", "asyncload", "fuzz", "libfuzz", "h2specasync", "h2specserver",
             "hsbench", "tlsbench"]:
     files.add "tools/" & t & ".nim"
   for e in ["hello", "interceptors", "greeter/server", "greeter/client", "greeter/async"]:

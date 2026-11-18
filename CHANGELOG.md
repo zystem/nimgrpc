@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- A coverage-guided fuzzer, `tools/libfuzz.nim` (libFuzzer, built with clang, AddressSanitizer and UBSan; `tools/libfuzz.sh TARGET [SECONDS]`), over the six targets of `tools/fuzz.nim`: gRPC framing, gzip, three Protobuf message types and the HTTP/2 server session. The targets and the seeds moved to `tools/fuzztargets.nim`, shared by both. The weekly `fuzz.yml` runs it once per target and keeps the corpus in the cache. Run on 2026-11-18, 30 s per target on a development machine: no finding. It instruments our code only; nghttp2 and zlib are linked as built.
 - `ClientLimits` for `dial` and `dialAsync` (blocking and chronos): `handshakeTimeoutMs` (20 s by default) closes a connection whose server accepted the TCP connection and does not finish TLS and send its first SETTINGS (before, a call with no deadline waited for ever); `maxHeaderListBytes` (64 KiB by default) resets a call whose response headers or trailers weigh more. `tests/tclientlimits.nim`.
 
 ### Fixed

@@ -1,7 +1,8 @@
 name: Fuzz
 
 # The parsers that face the network (gRPC framing, gzip, Protobuf, the HTTP/2 session), under
-# AddressSanitizer, once a week. tools/fuzz.nim is a mutation fuzzer, not coverage-guided.
+# AddressSanitizer, once a week: tools/fuzz.nim, a mutation fuzzer, and tools/libfuzz.nim, a
+# coverage-guided one (libFuzzer) whose corpus is kept between runs in the cache.
 # A finding uploads the input that was running and opens an issue; it does not block merges.
 on:
   schedule:
@@ -54,3 +55,55 @@ jobs:
         run: |
           body="The weekly fuzz run found a crash or hang: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (the input is in the artifact fuzz-finding, file current-TARGET.bin)"$'\n\n```\n'"$(tail -n 25 fuzz.txt)"$'\n```'
           gh issue create --title "Fuzz finding" --body "$body"
+
+  libfuzzer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [frames, gzip, everything, legacy, wkt, h2server]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Corpus of the last run
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz-out/corpus-${{ matrix.target }}
+          key: libfuzz-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: libfuzz-${{ matrix.target }}-
+      - name: Fuzz (libFuzzer, clang)
+        id: fuzz
+        env:
+          OUT: fuzz-out
+          SECONDS_INPUT: ${{ github.event.inputs.seconds || '300' }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          case "$SECONDS_INPUT" in ''|*[!0-9]*) echo "seconds must be a number" >&2; exit 2;; esac
+          tools/libfuzz.sh "$TARGET" "$SECONDS_INPUT" 2>&1 | tee fuzz.txt; exit "${PIPESTATUS[0]}"
+      - name: Keep the reproducer
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libfuzz-finding-${{ matrix.target }}
+          path: |
+            fuzz-out/crash-*
+            fuzz-out/timeout-*
+            fuzz-out/oom-*
+            fuzz.txt
+          retention-days: 90
+      - name: Open an issue on a finding
+        if: failure() && steps.fuzz.outcome == 'failure' && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          body="The weekly libFuzzer run of the target ${TARGET} found a crash, a hang or an out-of-memory input: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (the input is in the artifact libfuzz-finding-${TARGET}; run it with the binary of tools/libfuzz.sh)"$'\n\n```\n'"$(tail -n 25 fuzz.txt)"$'\n```'
+          gh issue create --title "libFuzzer finding: ${TARGET}" --body "$body"
