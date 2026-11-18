@@ -1,6 +1,6 @@
 ## Client limits: a server that stays silent, and a server whose headers are too big.
 
-import std/[unittest, strutils, times, net, os]
+import std/[unittest, strutils, times, net]
 import pkg/chronos
 import nimgrpc/h2/[blocking, nghttp2, common]
 import nimgrpc/[asyncclient, status]
