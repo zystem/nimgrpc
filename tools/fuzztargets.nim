@@ -5,9 +5,11 @@ import std/os
 import nimgrpc/[wire, status, protobuf]
 import nimgrpc/compress/gzip
 import nimgrpc/h2/session
+import nimgrpc/tls/tls
 import ../tests/gen/[codec_pb, legacy_pb, wkt_use_pb]
 
 const protoDir = currentSourcePath.parentDir.parentDir / "tests" / "proto"
+const certDir = currentSourcePath.parentDir.parentDir / "tests" / "certs"
 
 proc bytesOf(s: string): seq[byte] = @(s.toOpenArrayByte(0, s.high))
 
@@ -80,6 +82,60 @@ proc tH2Client*(d: seq[byte]) =
       discard s.takeOutput()
   except H2Error: discard
 
+# ---- TLS records: the first byte of an input picks the configuration (odd: mutual TLS)
+
+proc pem(name: string): string = readFile(certDir / name)
+
+var tlsConfs: array[4, TlsConfig]   ## server, mutual server, client, mutual client
+
+proc tlsConf(i: int): TlsConfig =
+  if tlsConfs[i].isNil:
+    tlsConfs[i] =
+      case i
+      of 0: tlsServerConfig(pem"server.pem", pem"server.key")
+      of 1: tlsServerConfig(pem"server.pem", pem"server.key", clientCaPem = pem"ca.pem")
+      of 2: tlsClientConfig(pem"ca.pem")
+      else: tlsClientConfig(pem"ca.pem", pem"client.pem", pem"client.key")
+  tlsConfs[i]
+
+proc feedAll(t: TlsConn; data: openArray[byte]) =
+  var off = 0
+  while off < data.len:
+    let n = t.pushRecords(data.toOpenArray(off, data.high))
+    if n == 0: break
+    off += n
+
+proc tlsRun(t: TlsConn; d: seq[byte]) =
+  ## Bytes from the peer in two reads; what the connection would send back is taken each time,
+  ## and, once the handshake is through, a message goes out and the peer is checked.
+  let body = if d.len > 1: d[1 .. ^1] else: @[]
+  let cut = if body.len == 0: 0 else: splitAt mod (body.len + 1)
+  var plain: seq[byte]
+  try:
+    discard t.pullRecords()
+    for part in [body[0 ..< cut], body[cut .. ^1]]:
+      t.feedAll(part)
+      t.pullApp(plain)
+      discard t.pullRecords()
+    if t.handshakeDone:
+      t.checkPeer()
+      discard t.pushApp(@[1'u8, 2, 3])
+      t.flush()
+      discard t.pullRecords()
+    discard t.errorMessage()
+  except TlsError: discard
+  t.close()
+
+proc tTlsServer*(d: seq[byte]) =
+  ## What a client may send to a server of this library.
+  if d.len == 0: return
+  tlsRun(newServerTls(tlsConf(int(d[0] and 1))), d)
+
+proc tTlsClient*(d: seq[byte]) =
+  ## What a server may send to a client of this library.
+  if d.len == 0: return
+  tlsRun(newClientTls(tlsConf(2 + int(d[0] and 1)), "localhost"), d)
+
 # ------------------------------------------------------------------- seeds
 
 proc framed(msg: seq[byte]; flag = 0'u8): seq[byte] =
@@ -130,6 +186,27 @@ proc h2ServerBytes(): seq[seq[byte]] =
   r.ping()
   result.add r.takeOutput()
 
+proc tlsFlights(mutual: bool): tuple[toServer, toClient: seq[byte]] =
+  ## The two directions of a real handshake and one message, as the bytes cross the network.
+  let c = newClientTls(tlsConf(2 + int(mutual)), "localhost")
+  let s = newServerTls(tlsConf(int(mutual)))
+  for _ in 0 ..< 50:
+    let b = c.pullRecords()
+    result.toServer.add b
+    s.feedAll b
+    let a = s.pullRecords()
+    result.toClient.add a
+    c.feedAll a
+    if c.handshakeDone and s.handshakeDone: break
+  discard c.pushApp(bytesOf("hello"))
+  c.flush()
+  let m = c.pullRecords()
+  result.toServer.add m
+  s.feedAll m
+  discard s.pushApp(bytesOf("world"))
+  s.flush()
+  result.toClient.add s.pullRecords()
+
 proc nestedGroups(n: int): seq[byte] =
   ## n nested unknown groups (field 1000), closed: the shape of a stack-depth attack.
   for i in 0 ..< n: result.add [0xC3'u8, 0x3E]
@@ -147,5 +224,11 @@ proc seedsFor*(target: string): seq[seq[byte]] =
   of "wkt": result = @[bytesOf(readFile(protoDir / "wkt.bin")), @[]]
   of "h2server": result = h2ClientBytes()
   of "h2client": result = h2ServerBytes()
+  of "tlsserver", "tlsclient":
+    for mutual in [false, true]:
+      let f = tlsFlights(mutual)
+      let one = if target == "tlsserver": f.toServer else: f.toClient
+      result.add @[byte(mutual)] & one
+      result.add @[byte(mutual)] & one[0 ..< one.len div 2]
   else: quit "unknown target " & target
 
