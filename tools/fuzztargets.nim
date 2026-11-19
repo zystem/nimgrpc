@@ -60,6 +60,26 @@ proc tH2Server*(d: seq[byte]) =
     discard s.takeOutput()
   except H2Error: discard
 
+proc tH2Client*(d: seq[byte]) =
+  ## What a server may send to a client with one call open: the bytes arrive in two reads, the
+  ## client credits what it reads (manual flow control) and answers what it must.
+  let s = newClientSession(manualFlow = true, maxHeaderListBytes = 2048)
+  try:
+    let id = s.submitRequest(@[(":method", "POST"), (":scheme", "http"),
+                               (":authority", "fuzz"), (":path", "/f.F/Call"),
+                               ("content-type", "application/grpc"), ("te", "trailers")])
+    s.sendData(id, @[0'u8, 0, 0, 0, 1, 7], endStream = false)
+    discard s.takeOutput()
+    let cut = if d.len == 0: 0 else: splitAt mod (d.len + 1)
+    for part in [d[0 ..< cut], d[cut .. ^1]]:
+      s.recv(part)
+      for ev in s.takeEvents():
+        if ev.kind == evData and ev.data.len > 0:
+          s.consume(ev.streamId, ev.data.len)
+          s.consumeConnection(ev.data.len)
+      discard s.takeOutput()
+  except H2Error: discard
+
 # ------------------------------------------------------------------- seeds
 
 proc framed(msg: seq[byte]; flag = 0'u8): seq[byte] =
@@ -82,6 +102,34 @@ proc h2ClientBytes(): seq[seq[byte]] =
   result.add first & second & c.takeOutput()
   result.add c.takeOutput()
 
+proc h2ServerBytes(): seq[seq[byte]] =
+  ## What real servers send: SETTINGS, response headers, a message, trailers, a reset, a GOAWAY.
+  let c = newClientSession()
+  let cid = c.submitRequest(@[(":method", "POST"), (":scheme", "http"),
+                              (":authority", "fuzz"), (":path", "/f.F/Call"),
+                              ("content-type", "application/grpc"), ("te", "trailers")])
+  c.sendData(cid, framed(@[1'u8, 2, 3, 4]), endStream = true)
+  let srv = newServerSession()
+  srv.recv(c.takeOutput())
+  var id = 0'i32
+  for ev in srv.takeEvents():
+    if ev.kind == evHeaders: id = ev.streamId
+  var all = srv.takeOutput()              # SETTINGS and its ACK
+  result.add all
+  srv.submitResponse(id, @[(":status", "200"), ("content-type", "application/grpc")])
+  srv.sendData(id, framed(bytesOf("reply")))
+  all.add srv.takeOutput()
+  result.add all
+  srv.sendTrailers(id, @[("grpc-status", "0"), ("grpc-message", "ok")])
+  all.add srv.takeOutput()
+  result.add all
+  srv.goAway()
+  result.add all & srv.takeOutput()
+  let r = newServerSession()               # a trailers-only answer, then a reset
+  r.recv(c.takeOutput())
+  r.ping()
+  result.add r.takeOutput()
+
 proc nestedGroups(n: int): seq[byte] =
   ## n nested unknown groups (field 1000), closed: the shape of a stack-depth attack.
   for i in 0 ..< n: result.add [0xC3'u8, 0x3E]
@@ -98,5 +146,6 @@ proc seedsFor*(target: string): seq[seq[byte]] =
   of "legacy": result = @[bytesOf(readFile(protoDir / "legacy.bin")), @[]]
   of "wkt": result = @[bytesOf(readFile(protoDir / "wkt.bin")), @[]]
   of "h2server": result = h2ClientBytes()
+  of "h2client": result = h2ServerBytes()
   else: quit "unknown target " & target
 

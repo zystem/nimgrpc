@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build the coverage-guided fuzzer (libFuzzer, needs clang) for one target and run it.
-#   tools/libfuzz.sh TARGET [SECONDS]      TARGET: frames gzip everything legacy wkt h2server
+#   tools/libfuzz.sh TARGET [SECONDS]      TARGET: frames gzip everything legacy wkt h2server h2client
 # Environment: OUT (default fuzz-out: the corpus, and a crash-* file when there is a finding),
 # CLANG (default: clang, else clang-18), NIMFLAGS (for example -d:nghttp2Prefix=...).
 # The corpus in OUT/corpus-TARGET grows between runs; keep it between runs to go further.
