@@ -8,7 +8,7 @@ else is marked "not run". `tests/tdocs.nim` compares the figures marked ✔ with
 
 | Version | State |
 |---|---|
-| 0.6.0 ✔ (the latest release) and the head of `main` | supported: fixes are made here |
+| 0.7.0 ✔ (the latest release) and the head of `main` | supported: fixes are made here |
 | earlier releases | not supported: update ([upgrading.md](upgrading.md)) |
 
 A release is supported until the next one is made; there is no long-term line
