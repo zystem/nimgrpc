@@ -26,11 +26,12 @@ proc LLVMFuzzerTestOneInput(data: ptr UncheckedArray[byte]; size: csize_t): cint
     elif fuzzTarget == "everything": tEverything(d)
     elif fuzzTarget == "legacy": tLegacy(d)
     elif fuzzTarget == "wkt": tWkt(d)
-    elif fuzzTarget == "h2server":
+    elif fuzzTarget == "h2server" or fuzzTarget == "h2client":
       # the first two bytes say where the input is cut into two reads
       if d.len >= 2:
         splitAt = d[0].int shl 8 or d[1].int
-        tH2Server(d[2 .. ^1])
+        when fuzzTarget == "h2server": tH2Server(d[2 .. ^1])
+        else: tH2Client(d[2 .. ^1])
     else: {.error: "unknown -d:fuzzTarget".}
   except Exception:
     cAbort()    # an error the parser should not raise: libFuzzer keeps the input
