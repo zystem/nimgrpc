@@ -4,6 +4,15 @@ The latest release is supported ([SECURITY.md](../SECURITY.md)). Read the notes 
 
 General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new commit); rebuild nghttp2 if [building.md](building.md) names a new version; regenerate the code of your `.proto` files with the new `protoc-gen-nim` (generated code and the library are versioned together); run your tests.
 
+## 0.7.0
+
+- **A client waits at most 20 s for a server that stays silent**: `ClientLimits.handshakeTimeoutMs` closes a connection whose server accepted the TCP connection and has not finished TLS and sent its first SETTINGS by then, and the call fails with UNAVAILABLE (before, a call with no deadline waited for ever). A server that is only slow to answer is not affected: the limit ends when its first SETTINGS arrives. Pass `limits = ClientLimits(handshakeTimeoutMs: 0)` to `dial` or `dialAsync` for the former behaviour.
+- **A client resets a call whose response headers or trailers weigh more than 64 KiB** (`ClientLimits.maxHeaderListBytes`, announced to the server as SETTINGS_MAX_HEADER_LIST_SIZE). Few servers send that much; `ClientLimits(maxHeaderListBytes: 0)` leaves only nghttp2's own limits. This is why the number is 0.7: two defaults are new.
+- **Fixed**: a call could wait for ever when nghttp2 reset its stream while the session framed the RST_STREAM and the connection had nothing more to read. Nothing to change in your code.
+- **Less memory**: a chronos connection with a call open takes 28 KiB instead of 38. Nothing to change in your code.
+- **nghttp2, BearSSL, zlib**: unchanged (nghttp2 1.71.0 in the CI, `bearssl` 0.3.1 the lowest, the system's zlib). Advisories read on 2026-11-19: nghttp2 none after GHSA-6933-cjhr-5qg6 (fixed in 1.68.1; CVE-2026-58055 of 2026 concerns `nghttpx`, the proxy, not the library); zlib none (1.4 was released on 2026-11-05 and has not been tried here: the CI uses the system's 1.3); BearSSL has no advisory channel and its commits since the last release were not read one by one.
+- Nothing else changes in behaviour.
+
 ## 0.6.0
 
 - **Interceptors** are new ([interceptors.md](interceptors.md)): `addInterceptor` on a server and on a channel, blocking and chronos. A program that adds none behaves as before. This is why the number is 0.6: the API grows; nothing existing changes.

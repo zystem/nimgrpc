@@ -1,4 +1,4 @@
-version       = "0.6.0"
+version       = "0.7.0"
 author        = "zystem"
 description   = "gRPC for Nim on top of nghttp2"
 license       = "MIT"
