@@ -43,4 +43,4 @@ Static musl builds are possible ([static-build.md](static-build.md)); no run-tim
 
 ## 6. Gaps (known)
 
-Single maintainer (no second reviewer); the coverage-guided fuzzer instruments our code, not nghttp2 or zlib as linked, and has no target for TLS records (see [roadmap.md](roadmap.md)); no static analysis tool for Nim beyond the compiler's warnings; no code-coverage measurement; `Limits.maxConnections` and `maxConnectionsPerIp` are off by default. A gap is a reason to read [threat-model.md](threat-model.md), not a hidden risk.
+Single maintainer (no second reviewer); the coverage-guided fuzzer instruments our code and BearSSL (compiled with it), not nghttp2 or zlib as linked (see [roadmap.md](roadmap.md)); no static analysis tool for Nim beyond the compiler's warnings; no code-coverage measurement; `Limits.maxConnections` and `maxConnectionsPerIp` are off by default. A gap is a reason to read [threat-model.md](threat-model.md), not a hidden risk.

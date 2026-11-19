@@ -2,7 +2,7 @@
 ## Protobuf decoding (several message types) and the HTTP/2 session.
 ##
 ##   fuzz TARGET SECONDS [SEED] [OUTDIR]
-##   TARGET: frames | gzip | everything | legacy | wkt | h2server | h2client | all
+##   TARGET: frames | gzip | everything | legacy | wkt | h2server | h2client | tlsserver | tlsclient | all
 ##
 ## Seeds are valid inputs (the fixtures of tests/proto, framed messages, the
 ## bytes a real client session emits); each round mutates one (bit flips,
@@ -71,6 +71,8 @@ proc run(target: string; seconds: int; seed: int64; outDir: string) =
       of "legacy": tLegacy(input)
       of "wkt": tWkt(input)
       of "h2client": tH2Client(input)
+      of "tlsserver": tTlsServer(input)
+      of "tlsclient": tTlsClient(input)
       else: tH2Server(input)
       inc rounds
   cur.close()
@@ -83,7 +85,7 @@ when isMainModule:
     createDir paramStr(3)
     for i, sd in seedsFor(paramStr(2)):
       # the h2 target reads the first two bytes as the place where its input is cut in two
-      let body = if paramStr(2) in ["h2server", "h2client"]: @[0'u8, 0] & sd else: sd
+      let body = if paramStr(2) in ["h2server", "h2client", "tlsserver", "tlsclient"]: @[0'u8, 0] & sd else: sd
       writeFile(paramStr(3) / ("seed" & $i), cast[string](body))
     quit 0
   if paramCount() < 2: quit "usage: see the top of tools/fuzz.nim"
@@ -92,7 +94,7 @@ when isMainModule:
   let seed = if paramCount() >= 3: parseBiggestInt(paramStr(3)) else: int64(epochTime())
   let outDir = if paramCount() >= 4: paramStr(4) else: "fuzz-out"
   if target == "all":
-    for t in ["frames", "gzip", "everything", "legacy", "wkt", "h2server", "h2client"]:
+    for t in ["frames", "gzip", "everything", "legacy", "wkt", "h2server", "h2client", "tlsserver", "tlsclient"]:
       run(t, secs, seed, outDir)
   else:
     run(target, secs, seed, outDir)

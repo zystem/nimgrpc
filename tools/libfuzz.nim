@@ -32,6 +32,12 @@ proc LLVMFuzzerTestOneInput(data: ptr UncheckedArray[byte]; size: csize_t): cint
         splitAt = d[0].int shl 8 or d[1].int
         when fuzzTarget == "h2server": tH2Server(d[2 .. ^1])
         else: tH2Client(d[2 .. ^1])
+    elif fuzzTarget == "tlsserver" or fuzzTarget == "tlsclient":
+      # two bytes for the cut, then the byte that picks the configuration
+      if d.len >= 3:
+        splitAt = d[0].int shl 8 or d[1].int
+        when fuzzTarget == "tlsserver": tTlsServer(d[2 .. ^1])
+        else: tTlsClient(d[2 .. ^1])
     else: {.error: "unknown -d:fuzzTarget".}
   except Exception:
     cAbort()    # an error the parser should not raise: libFuzzer keeps the input
