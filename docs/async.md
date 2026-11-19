@@ -131,9 +131,10 @@ Linux x86-64, `-d:release`, one thread (`tools/asyncload.nim`):
   30 MiB; with 5,000: 142 MiB. About 28 KiB per connection with an open call
   (38 KiB before the per-connection tables were made small, 2026-11-18),
   of which about 9 KiB is the nghttp2 session and 4 KiB chronos' read buffer.
-  With TLS about 75 KiB, measured before that change and not repeated (BearSSL's two 16 KiB record buffers live in each
+  With TLS 86 KiB (96 KiB before that change; an earlier version of this page said about 75, which
+  the weekly soak runs did not confirm), measured on 2026-11-19 (BearSSL's two 16 KiB record buffers live in each
   connection). `.github/workflows/soak.yml` repeats the measurement each week
-  (`tools/soak.sh`, plain and TLS) and fails when it passes 60 and 100 KiB, or when
+  (`tools/soak.sh`, plain and TLS) and fails when it passes 34 and 96 KiB, or when
   the server's memory or descriptors grow during connection churn.
 - Where it goes (heaptrack, `tools/profile.sh`, weekly in `.github/workflows/profile.yml`;
   1000 held connections, peak heap about 41 KiB each without TLS, taken before the

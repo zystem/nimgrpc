@@ -6,7 +6,7 @@
 # Build tools/asyncload.nim with -d:release first (ASYNCLOAD=path, default
 # /tmp/asyncload). Environment:
 #   HOLD_CONNS     connections held open in phase 1          (default 1000)
-#   BUDGET_KIB     allowed server RSS per held connection    (default 60 plain, 100 with TLS)
+#   BUDGET_KIB     allowed server RSS per held connection    (default 34 plain, 96 with TLS)
 #   CHURN_WORKERS  concurrent dial/call/close loops          (default 20)
 #   CHURN_SECONDS  length of phase 2                         (default 600)
 #   GROWTH_KIB     allowed RSS growth between the second half-point and the end of phase 2 (default 8192)
@@ -17,7 +17,9 @@ set -u
 MODE=""; [ "${1:-}" = "--tls" ] && MODE="tls"
 BIN=${ASYNCLOAD:-/tmp/asyncload}
 HOLD_CONNS=${HOLD_CONNS:-1000}
-if [ -n "$MODE" ]; then DEF_BUDGET=100; else DEF_BUDGET=60; fi
+# Measured on 2026-11-19 (HOLD_CONNS 1000, a development machine and the CI runner alike):
+# 28 KiB plain and 86 KiB with TLS; the budgets leave about 10 KiB of room.
+if [ -n "$MODE" ]; then DEF_BUDGET=96; else DEF_BUDGET=34; fi
 BUDGET_KIB=${BUDGET_KIB:-$DEF_BUDGET}
 CHURN_WORKERS=${CHURN_WORKERS:-20}
 CHURN_SECONDS=${CHURN_SECONDS:-600}
