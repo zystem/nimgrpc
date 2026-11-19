@@ -10,6 +10,7 @@
 - A stream that nghttp2 reset while the session framed the RST_STREAM (a callback that fails, on a connection with nothing more to read) was reported closed only when the next bytes arrived, so a call could wait for ever. The reader looks at the session's events again after it has queued the output, on both adapters.
 
 ### Changed
+- The weekly soak test fails over 34 KiB per held connection (plain) and 96 KiB (TLS), from 60 and 100: the measured figures are 28 and 86 KiB since the stream tables were made small, and a regression of 10 KiB is now seen. `docs/async.md` gave about 75 KiB for TLS; the soak runs had always measured 96, and it is 86 now.
 - Less memory per connection on the chronos server: the tables of open streams start with 4 slots instead of 64. A server with 1,000 connections, each with a call open, holds 30 MiB instead of 40 (38 KiB to 28 KiB per connection; 5,000: 142 MiB instead of 191). Measured on 2026-11-18, plain HTTP/2; TLS not measured.
 
 ## 0.6.0 — 2026-11-17
