@@ -30,7 +30,7 @@ The HTTP/2 session (`h2/session.nim`) never touches a socket: bytes go in, bytes
 
 | Action | By | What happens |
 |---|---|---|
-| Unary / streaming call | program | headers and length-prefixed messages go out on a stream; replies and trailers (`grpc-status`) come back; a deadline resets the stream |
+| Unary / streaming call | program | headers and length-prefixed messages go out on a stream; replies and trailers (`grpc-status`) come back; a deadline resets the stream on the client; on a server the call ends with DEADLINE_EXCEEDED in trailers |
 | Serve | program | a listener accepts connections; each request stream runs a handler; unset methods answer `UNIMPLEMENTED` |
 | Cancel | either side | RST_STREAM; the handler sees `ctx.isCancelled` |
 | Keepalive, GOAWAY, shutdown | library | pings on idle connections, graceful drain on stop, reconnecting channels |
