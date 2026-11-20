@@ -133,6 +133,8 @@ tests/interop/interop client 127.0.0.1 10011
 tests/interop/java_interop.sh      # needs a JDK and Maven; about 2 minutes
 ```
 
+`.github/workflows/java-interop.yml` runs it each week and when the interop files change; a failure of the weekly run opens an issue.
+
 The Nim peers take `--server-name=NAME` (the name the client checks in the certificate), `--no-per-message-compression` and, as a server, `--max-message=BYTES`.
 
 ## Health checking against grpc-go
