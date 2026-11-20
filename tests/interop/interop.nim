@@ -2,11 +2,13 @@
 ## (tests/gen): a grpc.testing.TestService server and a client running the
 ## interop cases from nimgrpc/grpc doc/interop-test-descriptions.md.
 ##
-##   interop server PORT [--tls|--mtls] [--certs=DIR]
-##   interop client HOST PORT [CASES] [--tls|--mtls] [--certs=DIR] [--lenient-compression]
+##   interop server PORT [--tls|--mtls] [--certs=DIR] [--max-message=BYTES]
+##   interop client HOST PORT [CASES] [--tls|--mtls] [--certs=DIR] [--server-name=NAME]
+##                  [--lenient-compression] [--no-per-message-compression]
 
 import std/strutils
 import nimgrpc, nimgrpc/cleanup
+from nimgrpc/wire import defaultMaxMessage
 import ../gen/grpc/testing/test_pb
 
 const
@@ -77,8 +79,8 @@ proc fullDuplexCall(ctx: var ServerContext;
       if p.intervalUs > 0: ctx.sleep(p.intervalUs div 1000)
       call.send(StreamingOutputCallResponse(payload: zeros(p.size)), p.compressed.value)
 
-proc newTestServer*(port = 0; tls: TlsConfig = nil): GrpcServer =
-  result = newGrpcServer(port, tls = tls)
+proc newTestServer*(port = 0; tls: TlsConfig = nil; maxMessage = defaultMaxMessage): GrpcServer =
+  result = newGrpcServer(port, tls = tls, maxMessage = maxMessage)
   result.registerTestService(TestServiceHandlers(
     emptyCall: emptyCall, unaryCall: unaryCall,
     streamingOutputCall: streamingOutputCall,
@@ -116,6 +118,11 @@ proc outReq(respSizes: openArray[int32]; payload = 0;
 const
   reqSizes = [27182, 8, 1828, 45904]
   respSizes = [31415'i32, 9, 2653, 58979]
+
+var perMessageCompression* = true
+  ## Off against servers that do not choose compression per message at all (grpc-java sets it
+  ## for a whole unary call and never for a stream): the check that the first streamed message
+  ## is compressed when the request asks for it is skipped.
 
 var strictCompression* = true
   ## Off against servers that cannot report whether a request was compressed
@@ -281,7 +288,8 @@ proc runCase*(ch: GrpcChannel; name: string) =
     var call = svc.streamingOutputCall(req, timeoutMs = 10_000)
     withCleanup:
       check call.recv(resp), "no first response"
-      check resp.payload.body.len == 31415 and call.lastCompressed, "first: compressed 31415"
+      check resp.payload.body.len == 31415 and (call.lastCompressed or not perMessageCompression),
+            "first: compressed 31415"
       check call.recv(resp), "no second response"
       check resp.payload.body.len == 92653, "second: size"
       if strictCompression: check not call.lastCompressed, "second must not be compressed"
@@ -332,11 +340,16 @@ when isMainModule:
   import std/os
   var pos: seq[string]
   var mode = ""
+  var serverNameOpt = "localhost"
+  var maxMessageOpt = defaultMaxMessage
   var certs = currentSourcePath.parentDir.parentDir / "certs"
   for i in 1 .. paramCount():
     let a = paramStr(i)
     if a in ["--tls", "--mtls"]: mode = a[2 .. ^1]
     elif a == "--lenient-compression": strictCompression = false
+    elif a == "--no-per-message-compression": perMessageCompression = false
+    elif a.startsWith("--server-name="): serverNameOpt = a["--server-name=".len .. ^1]
+    elif a.startsWith("--max-message="): maxMessageOpt = parseInt(a["--max-message=".len .. ^1])
     elif a.startsWith("--certs="): certs = a["--certs=".len .. ^1]
     else: pos.add a
   proc pem(name: string): string = readFile(certs / name)
@@ -345,7 +358,7 @@ when isMainModule:
       of "tls": tlsServerConfig(pem"server.pem", pem"server.key")
       of "mtls": tlsServerConfig(pem"server.pem", pem"server.key", clientCaPem = pem"ca.pem")
       else: nil
-    let s = newTestServer(if pos.len >= 2: parseInt(pos[1]) else: 10000, tls)
+    let s = newTestServer(if pos.len >= 2: parseInt(pos[1]) else: 10000, tls, maxMessageOpt)
     s.start()
     echo "listening on ", s.port, (if mode.len > 0: " (" & mode & ")" else: "")
     while true: sleep(1000)
@@ -357,4 +370,4 @@ when isMainModule:
       of "tls": tlsClientConfig(pem"ca.pem")
       of "mtls": tlsClientConfig(pem"ca.pem", pem"client.pem", pem"client.key")
       else: nil
-    quit(runClient(host, port, only, tls, if tls != nil: "localhost" else: ""))
+    quit(runClient(host, port, only, tls, if tls != nil: serverNameOpt else: ""))

@@ -1,0 +1,23 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <!-- Only fetches grpc-java's own interop client and server and what they need
+       (tests/interop/java_interop.sh); nothing is built from this file. -->
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>nimgrpc.interop</groupId>
+  <artifactId>javapeer</artifactId>
+  <version>1</version>
+  <packaging>pom</packaging>
+  <dependencies>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-interop-testing</artifactId>
+      <version>1.85.1</version>
+      <exclusions>
+        <!-- the lite runtime has the same classes as protobuf-java and hides its descriptors -->
+        <exclusion>
+          <groupId>com.google.protobuf</groupId>
+          <artifactId>protobuf-javalite</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+  </dependencies>
+</project>
