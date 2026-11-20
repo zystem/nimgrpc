@@ -4,11 +4,20 @@
 # Without PREFIX it goes to deps/nghttp2 in this repository, where config.nims finds it, so no
 # root is needed and nothing outside the repository changes. Needs curl, tar with xz, cmake,
 # a C compiler and sha256sum.
+# With FUZZ=1 it builds the copy for coverage-guided fuzzing (tools/libfuzz.sh): clang, with
+# -fsanitize=fuzzer-no-link,address,undefined (not "function": Nim names the types of the callbacks it passes differently), to deps/nghttp2-fuzz unless PREFIX is given.
 set -eu
 VERSION=1.71.0
 SHA256=c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116
 root=$(cd "$(dirname "$0")/.." && pwd)
-prefix=${1:-$root/deps/nghttp2}
+if [ "${FUZZ:-0}" = 1 ]; then
+  prefix=${1:-$root/deps/nghttp2-fuzz}
+  CC=${CLANG:-$(command -v clang || command -v clang-18)}
+  export CC
+  export CFLAGS="-O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize=function"
+else
+  prefix=${1:-$root/deps/nghttp2}
+fi
 case $prefix in /*) ;; *) prefix=$(pwd)/$prefix ;; esac
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

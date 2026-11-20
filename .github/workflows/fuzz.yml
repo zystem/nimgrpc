@@ -79,6 +79,10 @@ jobs:
           path: fuzz-out/corpus-${{ matrix.target }}
           key: libfuzz-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: libfuzz-${{ matrix.target }}-
+      - name: nghttp2 and zlib built with the sanitizers (tools/libfuzz.sh links them)
+        run: |
+          FUZZ=1 tools/build-nghttp2.sh
+          tools/build-zlib-fuzz.sh
       - name: Fuzz (libFuzzer, clang)
         id: fuzz
         env:

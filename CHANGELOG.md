@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- The coverage-guided fuzzer now sees into nghttp2 and zlib: `FUZZ=1 tools/build-nghttp2.sh` and `tools/build-zlib-fuzz.sh` build them with the sanitizers (to `deps/nghttp2-fuzz` and `deps/zlib-fuzz`), `tools/libfuzz.sh` links them when they exist, and the weekly `fuzz.yml` builds them first. Run on 2026-11-20, 40 s per target on a development machine, no finding; coverage (points) before and after: `h2server` 2631 to 6718, `h2client` (new, no earlier figure on the 30 s run) 8216, `gzip` 628 to 2238, `everything` 3756 to 3808. The UBSan check `function` is off for these builds (Nim names the callback types differently from nghttp2's header, so it reported each callback as a mismatch). Not run: the weekly workflow with this change on GitHub.
 - Two more fuzz targets, `tlsserver` and `tlsclient`, in `tools/fuzz.nim` and `tools/libfuzz.nim`: the TLS records a client may send to a server of this library and a server to a client of it, plain and with client certificates, through BearSSL (the seeds are the two directions of a real handshake and a message). The weekly workflow runs them. Run on 2026-11-19, 40 s each with libFuzzer on a development machine (about 10,000 coverage points on the server side, 8,500 on the client side): no finding. Nine targets in all.
 
 ## 0.7.0 — 2026-11-19
