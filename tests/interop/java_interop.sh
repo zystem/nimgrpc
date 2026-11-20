@@ -14,11 +14,13 @@
 set -u
 cd "$(dirname "$0")/../.."
 OUT=${OUT:-/tmp/nimgrpc-java-interop}
+case $OUT in /*) ;; *) OUT=$PWD/$OUT ;; esac   # Maven resolves a relative path against the pom
 BASE=${BASEPORT:-10040}
 JVERSION=1.85.1
 mkdir -p "$OUT/lib" "$OUT/certs"
 if [ ! -f "$OUT/lib/grpc-interop-testing-$JVERSION.jar" ]; then
   mvn -q -B -f tests/interop/javapeer/pom.xml dependency:copy-dependencies -DoutputDirectory="$OUT/lib" || exit 1
+  [ -f "$OUT/lib/grpc-interop-testing-$JVERSION.jar" ] || { echo "Maven did not fetch the interop jars into $OUT/lib" >&2; exit 1; }
 fi
 CP="$OUT/lib/*"
 # the test certificates are in grpc-testing's jar; the Nim peers expect ca.pem, server.pem, server.key
