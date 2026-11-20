@@ -1,0 +1,57 @@
+name: Interop with grpc-java
+
+# grpc-java's own interop client and server against the blocking and the chronos Nim peers, plaintext
+# and TLS, both directions (tests/interop/java_interop.sh), once a week and when these files change.
+# A failure of the weekly run opens an issue; it does not block merges.
+on:
+  schedule:
+    - cron: "17 3 * * 2"
+  workflow_dispatch:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "tests/interop/*.nim"
+      - "tests/interop/java_interop.sh"
+      - "tests/interop/javapeer/**"
+      - ".github/workflows/java-interop.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  java-interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: JDK and Maven of the runner
+        run: java -version && mvn -v
+      - name: Interop
+        id: interop
+        env:
+          OUT: java-interop-out
+        run: tests/interop/java_interop.sh 2>&1 | tee java-interop.txt; exit "${PIPESTATUS[0]}"
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: java-interop-logs
+          path: |
+            java-interop.txt
+            java-interop-out/*.log
+          retention-days: 30
+      - name: Open an issue on a failure of the weekly run
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body="The weekly interop run against grpc-java failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (logs in the artifact java-interop-logs)"$'\n\n```\n'"$(tail -n 25 java-interop.txt)"$'\n```'
+          gh issue create --title "Interop failure against grpc-java" --body "$body"
