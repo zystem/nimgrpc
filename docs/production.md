@@ -74,9 +74,11 @@ Set by default, check that they suit you:
 
 - [ ] `maxMessage` (4 MiB), `Limits.maxConcurrentStreams` (100 per connection),
       `handshakeTimeoutMs` (20 s), `maxConnectionBuffer` (16 MiB).
-- [ ] Blocking server: `maxWorkers` (256 calls at once). Memory under load is about the
-      number of running handlers times twice the size of a response
-      ([threat-model.md](threat-model.md), "slow or stalled peer").
+- [ ] Blocking server: `maxWorkers` (256 calls at once) and `Limits.maxQueuedCalls` (1024 calls
+      waiting for a worker; one more is refused with REFUSED_STREAM, and a client of this
+      library sees UNAVAILABLE and sends a unary call again). Memory under load is about the
+      number of running handlers times twice the size of a response, plus what the waiting
+      calls hold ([threat-model.md](threat-model.md), "slow or stalled peer").
 - [ ] `newHealth(maxWatches = 64)`, `newReflection(maxStreams = 16)` on the blocking server.
 - [ ] `pingPolicy`: off by default; set `minIntervalMs` to refuse clients that ping too often.
 - [ ] No rate limit of calls exists. Put one in front or in the handlers if you need it.

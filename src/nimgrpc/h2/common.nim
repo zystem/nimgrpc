@@ -71,6 +71,15 @@ type
       ## can keep a call, and on the blocking server its worker thread, by opening a streaming
       ## call and going quiet. 0 means no limit: set it unless the server has calls that are
       ## meant to stay open.
+    maxQueuedCalls*: int = 1024
+      ## The blocking server runs at most `maxWorkers` handlers at once (256 by default); a call
+      ## that arrives when all of them are busy waits in a queue, and it holds its request headers
+      ## and the first bytes of its body while it waits. Past this many waiting calls a new call
+      ## is refused with REFUSED_STREAM before it is queued: a client of this library sees
+      ## UNAVAILABLE, and sends a unary call again (it was not started). A call whose client reset
+      ## it, or whose connection closed, leaves the queue at once. 0 means no limit. The chronos
+      ## server has no queue and ignores it. Calls that are meant to stay open (streaming) hold
+      ## their workers for as long as they last: for many of them use the chronos server.
     maxConnectionBuffer*: int = 16 * 1024 * 1024
       ## Body bytes that handlers have queued on all the streams of one
       ## connection and the socket has not taken; a sender waits above it.
@@ -96,6 +105,7 @@ const
   maxStreamBuffer* = 256 * 1024    ## unsent body bytes per stream before send waits
   NO_ERROR* = 0'u32
   INTERNAL_ERROR* = 2'u32
+  REFUSED_STREAM* = 7'u32
   CANCEL* = 8'u32
   ENHANCE_YOUR_CALM* = 11'u32
   defaultPingTimeoutMs* = 20_000

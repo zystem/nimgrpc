@@ -14,7 +14,7 @@ const tests = ["tests/th2session.nim", "tests/tblocking.nim", "tests/tgrpc.nim",
                "tests/tlimits.nim", "tests/tclientlimits.nim", "tests/tasynclimits.nim", "tests/tchannelclose.nim", "tests/tipv6.nim",
                "tests/thandshake.nim", "tests/tconnage.nim", "tests/tconnageasync.nim",
                "tests/thealth.nim", "tests/thealthclient.nim", "tests/treflection.nim",
-               "tests/tretry.nim", "tests/teyeballs.nim", "tests/thostile.nim",
+               "tests/tretry.nim", "tests/teyeballs.nim", "tests/thostile.nim", "tests/tqueue.nim",
                "tests/tinterceptors.nim", "tests/texamples.nim", "tests/tdocs.nim"]
 
 proc runAll(flags, tag: string) =

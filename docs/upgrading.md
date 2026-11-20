@@ -4,6 +4,10 @@ The latest release is supported ([SECURITY.md](../SECURITY.md)). Read the notes 
 
 General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new commit); rebuild nghttp2 if [building.md](building.md) names a new version; regenerate the code of your `.proto` files with the new `protoc-gen-nim` (generated code and the library are versioned together); run your tests.
 
+## Unreleased
+
+- **The blocking server refuses calls past `Limits.maxQueuedCalls` (1024 by default)**: calls that wait for a worker used to queue without limit. Past 256 running handlers plus 1024 waiting, a new call is refused (REFUSED_STREAM; a client of this library sees UNAVAILABLE and sends a unary call again). Nothing to change unless you keep more than that many calls open on a blocking server: raise `maxQueuedCalls` (0 means no limit) or use the chronos server.
+
 ## 0.7.0
 
 - **A client waits at most 20 s for a server that stays silent**: `ClientLimits.handshakeTimeoutMs` closes a connection whose server accepted the TCP connection and has not finished TLS and sent its first SETTINGS by then, and the call fails with UNAVAILABLE (before, a call with no deadline waited for ever). A server that is only slow to answer is not affected: the limit ends when its first SETTINGS arrives. Pass `limits = ClientLimits(handshakeTimeoutMs: 0)` to `dial` or `dialAsync` for the former behaviour.
