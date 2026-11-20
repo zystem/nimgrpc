@@ -17,7 +17,7 @@ a **how-to** does one task, a **reference** is complete and dry, an **explanatio
 | [troubleshooting.md](troubleshooting.md) | reference | every message of the library: what it means and what to do |
 | [faq.md](faq.md) | reference | short answers to common questions |
 | [supported-versions.md](supported-versions.md) | reference | which versions of the library, Nim and the dependencies, and which platforms |
-| [interop.md](interop.md) | reference | the interop cases against grpc-go and how to run them |
+| [interop.md](interop.md) | reference | the interop cases against grpc-go and grpc-java and how to run them |
 | [h2spec.md](h2spec.md) | reference | the h2spec results and the known failures |
 | [security-requirements.md](security-requirements.md) | reference | what a user can and cannot expect in security |
 | [security-policies.md](security-policies.md) | reference | the rules the project holds itself to |

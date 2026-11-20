@@ -81,6 +81,20 @@ thread). Every combination passes in plaintext, TLS and mutual TLS:
 
 Run again with the Nim peers built against nghttp2 1.71.0 (Linux x86-64, Nim 2.4.0, grpc-go v1.76.0), once each in plaintext, TLS and mutual TLS: blocking and chronos clients against blocking and chronos servers, the grpc-go client against both Nim servers (compression probes included), and both Nim clients against the grpc-go server (`--lenient-compression`). All 24 runs passed every case. Not run this time: `keepalive_enforced`, the two rejection cases above, and the five-in-a-row repetition.
 
+## grpc-java 1.85.1, 2026-11-20
+
+grpc-java's own interop client and server (`io.grpc:grpc-interop-testing`, from Maven Central; JDK 21) against both Nim peers, run by `tests/interop/java_interop.sh`: plaintext and TLS (grpc-java's RSA test certificate for `foo.test.google.fr`; mutual TLS has no switch in the Java peers, so it is not run), in both directions, on the blocking and the chronos peer. All eight runs passed (Linux x86-64, Nim 2.4.0, nghttp2 1.71.0, one run each, 2026-11-20):
+
+| Direction | Cases | Result |
+|:---|:---|:---|
+| grpc-java client → Nim server, blocking and chronos, plaintext and TLS | the 18 above, plus `very_large_request`, `rpc_soak` and `channel_soak` (200 calls) | all pass, the compression probes included |
+| Nim client → grpc-java server, blocking, plaintext and TLS | the 18 above | all pass with `--lenient-compression --no-per-message-compression` |
+| Nim client → grpc-java server, chronos, plaintext and TLS | the 18 above and `concurrent_load` | all pass with the same flags |
+
+The Java client is the one reference peer that runs every check against the Nim server: it sends the probes (an uncompressed message that claims to be compressed) and reads the compressed flag of every response, which grpc-go cannot. The Java test server cannot do the same in the other direction: it does not check `expect_compressed` and it compresses a whole unary call or nothing, never one message of a stream (`TestServiceImpl` in grpc-java does not read `ResponseParameters.compressed`). So the Nim client skips the probes (`--lenient-compression`) and the check that the first message of `server_compressed_streaming` arrives compressed (`--no-per-message-compression`); the case still checks the sizes and that the stream ends.
+
+`very_large_request` sends 10 MiB in one message. A Nim server refuses it with RESOURCE_EXHAUSTED under the default limit of 4 MiB (`maxMessage`), as grpc-java's client reported on a first run; the script starts the Nim servers with `--max-message=16777216`, and then it passes. Not run: `cacheable_unary` (HTTP GET), the credential cases, `pick_first_unary`, the ORCA cases and `max_concurrent_streams_connection_scaling`.
+
 Not covered yet: the Google auth cases (they need Google credentials), and the
 load-balancing and xDS cases.
 
@@ -114,6 +128,12 @@ tests/interop/ainterop client 127.0.0.1 10012
 ./peer -addr 127.0.0.1:10010              # grpc-go client against the Nim server
 tests/interop/interop client 127.0.0.1 10011
 ```
+
+```sh
+tests/interop/java_interop.sh      # needs a JDK and Maven; about 2 minutes
+```
+
+The Nim peers take `--server-name=NAME` (the name the client checks in the certificate), `--no-per-message-compression` and, as a server, `--max-message=BYTES`.
 
 ## Health checking against grpc-go
 
