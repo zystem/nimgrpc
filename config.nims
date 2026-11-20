@@ -9,6 +9,11 @@ if existsEnv("NGHTTP2_PREFIX"):
   switch("define", "nghttp2Prefix=" & getEnv("NGHTTP2_PREFIX"))
 elif dirExists(thisDir() & "/deps/nghttp2"):
   switch("define", "nghttp2Prefix=" & thisDir() & "/deps/nghttp2")
+# mbedTLS (-d:tlsMbed only): MBEDTLS_PREFIX, or a build made by tools/build-mbedtls.sh (deps/mbedtls).
+if existsEnv("MBEDTLS_PREFIX"):
+  switch("define", "mbedtlsPrefix=" & getEnv("MBEDTLS_PREFIX"))
+elif dirExists(thisDir() & "/deps/mbedtls"):
+  switch("define", "mbedtlsPrefix=" & thisDir() & "/deps/mbedtls")
 # Dependencies outside nimble's reach (e.g. a sandbox): point at checkouts.
 if existsEnv("NIM_BEARSSL"): switch("path", getEnv("NIM_BEARSSL"))
 # Extra checkouts (chronos and its deps), separated by ':'.
