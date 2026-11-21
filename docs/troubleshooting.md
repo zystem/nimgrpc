@@ -59,7 +59,7 @@ failures marked **(run)** happen and compares the text.
 | Message | Status | Meaning | What to do |
 |---|---|---|---|
 | `unknown method /PKG.SERVICE/METHOD` **(run)** | UNIMPLEMENTED | The server has no handler at that path. | Register the service before `start`; compare the package and service names of both `.proto` files. |
-| `deadline exceeded`, `deadline exceeded on stream N` **(run)** | DEADLINE_EXCEEDED | The call took longer than its `timeoutMs`. | Give it more time, or make the handler faster; a handler sees it through `ctx.checkCancelled()`. |
+| `deadline exceeded`, `deadline exceeded on stream N` **(run)** | DEADLINE_EXCEEDED | The call took longer than its `timeoutMs`. A server ends a call whose deadline passed with this status in trailers (it does not reset the stream). | Give it more time, or make the handler faster; a handler sees it through `ctx.checkCancelled()`. |
 | `call cancelled`, `call cancelled: REASON` | CANCELLED | The call was closed before it ended: by the client, by a lost connection, by a stopping server, or by `Limits.maxCallMs`. | Expected when a side leaves; otherwise look at the reason. |
 | `internal error` **(run)** | UNKNOWN | A handler raised something that is not a `GrpcError`. The text is kept from the client on purpose. | On the server, `setErrorHook` to see it; raise `newGrpcError(code, msg)` for what the client should read. |
 | `message of N bytes exceeds the limit of M` **(run)** | RESOURCE_EXHAUSTED | A message is larger than `maxMessage` (4 MiB) of the side that reads it. | Raise `maxMessage` on that side (`newGrpcServer`, or the call), or send smaller messages or a stream. |
