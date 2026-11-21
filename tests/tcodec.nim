@@ -154,6 +154,73 @@ suite "proto3 codec":
     w.putTag(19, wtVarint); w.putVarint(5)
     check Everything.decode(w.buf).`type` == 5
 
+proc fromHex(s: string): seq[byte] =
+  let t = s.replace(" ", "")
+  for i in countup(0, t.len - 2, 2): result.add byte(parseHexInt(t[i .. i + 1]))
+
+proc varintOf(hex: string): Option[uint64] =
+  var r = initReader(fromHex(hex))
+  try: result = some(r.getVarint())
+  except ProtobufError: discard
+
+proc tagOf(hex: string): Option[(int, int)] =
+  var r = initReader(fromHex(hex))
+  var f: int
+  var w: WireType
+  try:
+    r.getTag(f, w)
+    result = some((f, ord(w)))
+  except ProtobufError: discard
+
+suite "varint and tag bounds":
+  ## The expected results of the varints are those of protobuf-go v1.36.12 (`protowire.ConsumeVarint`),
+  ## run on 2026-11-21 with tests/interop/gopb; the tags differ from it in two ways, in the tests
+  ## below that say so.
+  test "a varint is at most ten bytes, and the tenth is 0 or 1":
+    let nines = "ff ff ff ff ff ff ff ff ff"
+    check varintOf("00") == some(0'u64)
+    check varintOf("7f") == some(127'u64)
+    check varintOf("80 01") == some(128'u64)
+    check varintOf(nines & " 01") == some(high(uint64))
+    check varintOf("80 80 80 80 80 80 80 80 80 01") == some(1'u64 shl 63)
+    check varintOf("80 00") == some(0'u64)                                # padded, as protobuf-go
+    check varintOf("80 80 80 80 80 80 80 80 80 00") == some(0'u64)
+    check varintOf(nines & " 02").isNone          # it was cut to its low bit: 9223372036854775807
+    check varintOf(nines & " 7f").isNone          # it was 18446744073709551615
+    check varintOf("80 80 80 80 80 80 80 80 80 02").isNone    # it was 0
+    check varintOf(nines & " 81 00").isNone                   # eleven bytes
+    check varintOf("80 80 80 80 80 80 80 80 80 80 00").isNone
+    check varintOf("80").isNone                               # truncated
+
+  test "the largest values round-trip":
+    for v in [0'u64, 1, 127, 128, (1'u64 shl 32) - 1, 1'u64 shl 32, (1'u64 shl 63) - 1,
+              1'u64 shl 63, high(uint64)]:
+      var w: PbWriter
+      w.putVarint(v)
+      var r = initReader(w.buf)
+      check r.getVarint() == v
+      check r.atEnd
+
+  test "field numbers 1 to 2^29 - 1 are tags":
+    check tagOf("08") == some((1, 0))
+    check tagOf("f8 ff ff ff 0f") == some((maxFieldNumber, 0))
+    check maxFieldNumber == 536870911
+
+  test "field 0, a field number past 2^29 - 1 and wire types 6 and 7 are not tags":
+    check tagOf("00").isNone
+    check tagOf("07").isNone
+    check tagOf("0e").isNone            # protobuf-go leaves the wire type to its caller
+    check tagOf("0f").isNone
+    check tagOf("80 80 80 80 10").isNone     # field 2^29: protobuf-go reads it, as an unknown field
+    check tagOf("f8 ff ff ff ff 03").isNone  # past 2^31 - 1: protobuf-go refuses it too
+    check tagOf("f8 ff ff ff ff ff ff ff ff 01").isNone   # it was field 2^61 - 1
+
+  test "a message with such a value raises ProtobufError":
+    # field 19 (a varint) with an overflowing varint, and an unknown field 2^29
+    for bad in ["98 01 ff ff ff ff ff ff ff ff ff 02", "80 80 80 80 10 01"]:
+      expect ProtobufError:
+        discard Everything.decode(fromHex(bad))
+
 suite "large values":
   # A large bytes or string field is copied once into a buffer that is as long as the message
   # (it used to be reallocated twice, and one 4 MiB field cost 10 MiB).

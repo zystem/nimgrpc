@@ -8,6 +8,7 @@ nimcache/
 /tests/interop/*
 !/tests/interop/*.nim
 !/tests/interop/gopeer/
+!/tests/interop/gopb/
 !/tests/interop/javapeer/
 /tools/*
 !/tools/*.nim
