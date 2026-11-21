@@ -21,19 +21,50 @@
 #include <arpa/inet.h>
 #include "bearssl.h"
 
+/* A memset that the optimizer may not drop. A `memset` of memory that is freed next is a dead
+ * store to a compiler, and with optimization it is gone: the secret stays in the freed block
+ * (the audit of 2026-11-21 saw it missing in a release binary). Calling it through a volatile
+ * pointer makes the call opaque. */
+static void *(*volatile gtls_memset_v)(void *, int, size_t) = memset;
+static void secure_zero(void *p, size_t n) {
+    if (p && n) gtls_memset_v(p, 0, n);
+}
+
+#ifdef GTLS_FAIL_INJECT
+/* For tests/tmemory.nim only: the allocation with this number (0 is the next one) fails, once;
+ * -1 means none. Every allocation of this file goes through these four. */
+long gtls_fail_after = -1;
+static int gtls_fail_now(void) {
+    if (gtls_fail_after < 0) return 0;
+    if (gtls_fail_after == 0) { gtls_fail_after = -1; return 1; }
+    gtls_fail_after--;
+    return 0;
+}
+static void *g_malloc(size_t n) { return gtls_fail_now() ? NULL : malloc(n); }
+static void *g_calloc(size_t a, size_t b) { return gtls_fail_now() ? NULL : calloc(a, b); }
+static void *g_realloc(void *p, size_t n) { return gtls_fail_now() ? NULL : realloc(p, n); }
+static char *g_strdup(const char *s) { return gtls_fail_now() ? NULL : strdup(s); }
+#define malloc g_malloc
+#define calloc g_calloc
+#define realloc g_realloc
+#define strdup g_strdup
+#endif
+
 /* ------------------------------------------------------------------ buffers */
 
 typedef struct {
     unsigned char *buf;
     size_t len, cap;
+    int err;               /* an allocation failed: what is in `buf` is not all there was */
 } gbuf;
 
 static int gbuf_add(gbuf *b, const void *data, size_t len) {
+    if (b->err) return -1;
     if (b->len + len > b->cap) {
         size_t cap = b->cap ? b->cap * 2 : 1024;
         while (cap < b->len + len) cap *= 2;
         unsigned char *nb = realloc(b->buf, cap);
-        if (!nb) return -1;
+        if (!nb) { b->err = 1; return -1; }
         b->buf = nb;
         b->cap = cap;
     }
@@ -42,6 +73,8 @@ static int gbuf_add(gbuf *b, const void *data, size_t len) {
     return 0;
 }
 
+/* The decoders call this with no way to say "no": the failure is kept in the buffer, and whoever
+ * owns the buffer looks at `err` (a half-copied certificate or key must not be used). */
 static void gbuf_sink(void *ctx, const void *data, size_t len) {
     gbuf_add((gbuf *)ctx, data, len);
 }
@@ -60,7 +93,9 @@ typedef struct {
     size_t len;
 } pem_obj;
 
-/* Decodes every PEM object in `pem`. Returns the number of objects, or -1. */
+/* Decodes every PEM object in `pem`. Returns the number of objects, or -1 (a bad PEM, or an
+ * allocation that failed: nothing is returned then). The bytes of an object may be a private key;
+ * the working buffer is wiped before it is freed. */
 static long decode_pem(const unsigned char *pem, size_t len, pem_obj **out) {
     br_pem_decoder_context pc;
     pem_obj *objs = NULL;
@@ -83,18 +118,23 @@ static long decode_pem(const unsigned char *pem, size_t len, pem_obj **out) {
         }
         switch (br_pem_decoder_event(&pc)) {
         case BR_PEM_BEGIN_OBJ:
+            free(name);
             name = strdup(br_pem_decoder_name(&pc));
+            if (!name) goto fail;
             cur.len = 0;
             br_pem_decoder_setdest(&pc, gbuf_sink, &cur);
             inobj = 1;
             break;
         case BR_PEM_END_OBJ:
             if (inobj) {
+                if (cur.err) goto fail;
                 pem_obj *no = realloc(objs, (n + 1) * sizeof *objs);
                 if (!no) goto fail;
                 objs = no;
+                unsigned char *d = dupmem(cur.buf, cur.len);
+                if (!d) goto fail;
                 objs[n].name = name;
-                objs[n].data = dupmem(cur.buf, cur.len);
+                objs[n].data = d;
                 objs[n].len = cur.len;
                 name = NULL;
                 n++;
@@ -105,21 +145,28 @@ static long decode_pem(const unsigned char *pem, size_t len, pem_obj **out) {
             goto fail;
         }
     }
+    secure_zero(cur.buf, cur.cap);
     free(cur.buf);
     if (inobj) { free(name); goto fail2; }
+    free(name);
     *out = objs;
     return (long)n;
 fail:
+    secure_zero(cur.buf, cur.cap);
     free(cur.buf);
     free(name);
 fail2:
-    for (size_t i = 0; i < n; i++) { free(objs[i].name); free(objs[i].data); }
+    for (size_t i = 0; i < n; i++) { free(objs[i].name); secure_zero(objs[i].data, objs[i].len); free(objs[i].data); }
     free(objs);
     return -1;
 }
 
 static void free_pem(pem_obj *objs, long n) {
-    for (long i = 0; i < n; i++) { free(objs[i].name); free(objs[i].data); }
+    for (long i = 0; i < n; i++) {
+        free(objs[i].name);
+        secure_zero(objs[i].data, objs[i].len);    /* it may be a private key */
+        free(objs[i].data);
+    }
     free(objs);
 }
 
@@ -222,6 +269,7 @@ long gtls_conf_add_ca(gtls_conf *c, const unsigned char *pem, size_t len) {
         gbuf dn = {0};
         br_x509_decoder_init(&dc, dn_append, &dn);
         br_x509_decoder_push(&dc, objs[i].data, objs[i].len);
+        if (dn.err) { free(dn.buf); strcpy(c->err, "out of memory"); goto fail; }
         br_x509_pkey *pk = br_x509_decoder_get_pkey(&dc);
         if (pk == NULL) {
             free(dn.buf);
@@ -340,6 +388,7 @@ int gtls_conf_set_identity(gtls_conf *c, const unsigned char *chain_pem, size_t 
         int err = br_skey_decoder_last_error(&sk);
         if (err != 0) {
             snprintf(c->err, sizeof c->err, "private key decode error %d", err);
+            secure_zero(&sk, sizeof sk);
             goto fail;
         }
         ntype = br_skey_decoder_key_type(&sk);
@@ -347,7 +396,7 @@ int gtls_conf_set_identity(gtls_conf *c, const unsigned char *chain_pem, size_t 
             const br_rsa_private_key *k = br_skey_decoder_get_rsa(&sk);
             size_t tot = k->plen + k->qlen + k->dplen + k->dqlen + k->iqlen;
             unsigned char *m = malloc(tot ? tot : 1), *p = m;
-            if (!m) { strcpy(c->err, "out of memory"); goto fail; }
+            if (!m) { strcpy(c->err, "out of memory"); secure_zero(&sk, sizeof sk); goto fail; }
             nrsa = *k;
 #define CP(f, l) memcpy(p, k->f, k->l); nrsa.f = p; p += k->l;
             CP(p, plen) CP(q, qlen) CP(dp, dplen) CP(dq, dqlen) CP(iq, iqlen)
@@ -357,16 +406,17 @@ int gtls_conf_set_identity(gtls_conf *c, const unsigned char *chain_pem, size_t 
             const br_ec_private_key *k = br_skey_decoder_get_ec(&sk);
             nec = *k;
             nkey = dupmem(k->x, k->xlen);
-            if (!nkey) { strcpy(c->err, "out of memory"); goto fail; }
+            if (!nkey) { strcpy(c->err, "out of memory"); secure_zero(&sk, sizeof sk); goto fail; }
             nec.x = nkey;
         } else {
             strcpy(c->err, "unsupported private key");
+            secure_zero(&sk, sizeof sk);
             goto fail;
         }
+        secure_zero(&sk, sizeof sk);     /* the decoder holds a copy of the key */
         found = 1;
     }
-    for (long i = 0; i < n; i++) memset(objs[i].data, 0, objs[i].len);   /* the DER of the key */
-    free_pem(objs, n);
+    free_pem(objs, n);                   /* wipes the DER of the key */
     if (!found) {
         free_chain(nchain, nlen);
         strcpy(c->err, "no private key in PEM");
@@ -375,7 +425,7 @@ int gtls_conf_set_identity(gtls_conf *c, const unsigned char *chain_pem, size_t 
     /* publish: the old identity goes, the new one is whole */
     free_chain(c->chain, c->chain_len);
     if (c->key_mem) {
-        memset(c->key_mem, 0, key_bytes(c->key_type, &c->rsa, &c->ec));
+        secure_zero(c->key_mem, key_bytes(c->key_type, &c->rsa, &c->ec));
         free(c->key_mem);
     }
     c->chain = nchain;
@@ -386,8 +436,7 @@ int gtls_conf_set_identity(gtls_conf *c, const unsigned char *chain_pem, size_t 
     c->key_mem = nkey;
     return 0;
 fail:
-    if (nkey) { memset(nkey, 0, key_bytes(ntype, &nrsa, &nec)); free(nkey); }
-    for (long i = 0; i < n; i++) memset(objs[i].data, 0, objs[i].len);
+    if (nkey) { secure_zero(nkey, key_bytes(ntype, &nrsa, &nec)); free(nkey); }
     free_pem(objs, n);
     free_chain(nchain, nlen);
     return -1;
@@ -406,17 +455,14 @@ static void conf_destroy(gtls_conf *c) {
     free(c->tas);
     cache_free(c->cache);
     pthread_mutex_destroy(&c->mu);
-    memset(&c->csess, 0, sizeof c->csess);       /* the master secret */
     for (size_t i = 0; i < c->chain_len; i++) free(c->chain[i].data);
     free(c->chain);
     if (c->key_mem) {
         /* wipe the private key before giving the memory back */
-        size_t len = c->key_type == BR_KEYTYPE_RSA
-            ? c->rsa.plen + c->rsa.qlen + c->rsa.dplen + c->rsa.dqlen + c->rsa.iqlen
-            : c->ec.xlen;
-        memset(c->key_mem, 0, len);
+        secure_zero(c->key_mem, key_bytes(c->key_type, &c->rsa, &c->ec));
         free(c->key_mem);
     }
+    secure_zero(c, sizeof *c);                   /* the saved client session's master secret, and the key's pointers */
     free(c);
 }
 
@@ -651,6 +697,7 @@ typedef struct gtls_cache {
 static void cache_expire(gtls_cache *k) {
     long long now = now_s();
     if (now - k->epoch >= k->lifetime) {
+        secure_zero(k->buf, CACHE_BYTES);      /* the old sessions' master secrets, not only forgotten */
         br_ssl_session_cache_lru_init(&k->lru, k->buf, CACHE_BYTES);
         k->epoch = now;
     }
@@ -686,7 +733,9 @@ static const br_ssl_session_cache_class cache_class = {
 static void cache_free(gtls_cache *k) {
     if (!k) return;
     pthread_mutex_destroy(&k->mu);
+    secure_zero(k->buf, CACHE_BYTES);          /* sessions with their master secrets */
     free(k->buf);
+    secure_zero(k, sizeof *k);
     free(k);
 }
 
@@ -830,7 +879,7 @@ gtls_conn *gtls_client_new(gtls_conf *c, const char *server_name) {
     gtls_conf_freeze(c);          /* before anything is read from it */
     if (c->ta_num == 0) { strcpy(c->err, "client needs trust anchors"); return NULL; }
     gtls_conn *t = calloc(1, sizeof *t);
-    if (!t) return NULL;
+    if (!t) { strcpy(c->err, "out of memory"); return NULL; }
     t->eng = &t->u.client.eng;
     br_ssl_client_init_full(&t->u.client, &t->x509, c->tas, c->ta_num);
     setup_common(t, c);
@@ -873,7 +922,9 @@ gtls_conn *gtls_client_new(gtls_conf *c, const char *server_name) {
         if (t->watch.want_ip) reset_name = NULL;
     }
     if (!br_ssl_client_reset(&t->u.client, reset_name, t->offered)) {
+        secure_zero(t, sizeof *t);
         free(t);
+        strcpy(c->err, "cannot start the handshake");
         return NULL;
     }
     gtls_conf_retain(c);          /* the connection keeps the configuration alive; gtls_free lets go */
@@ -885,7 +936,7 @@ gtls_conn *gtls_server_new(gtls_conf *c) {
     gtls_conf_freeze(c);
     if (c->chain_len == 0) { strcpy(c->err, "server needs a certificate and key"); return NULL; }
     gtls_conn *t = calloc(1, sizeof *t);
-    if (!t) return NULL;
+    if (!t) { strcpy(c->err, "out of memory"); return NULL; }
     t->is_server = 1;
     t->eng = &t->u.server.eng;
     if (c->key_type == BR_KEYTYPE_RSA)
@@ -909,7 +960,9 @@ gtls_conn *gtls_server_new(gtls_conf *c) {
         t->verify_peer = 1;
     }
     if (!br_ssl_server_reset(&t->u.server)) {
+        secure_zero(t, sizeof *t);
         free(t);
+        strcpy(c->err, "cannot start the handshake");
         return NULL;
     }
     gtls_conf_retain(c);
@@ -920,7 +973,7 @@ void gtls_free(gtls_conn *t) {
     if (t) {
         gtls_conf *c = t->conf;
         free(t->watch.leaf);
-        memset(t, 0, sizeof *t);
+        secure_zero(t, sizeof *t);     /* the record keys and the plaintext in its buffers */
         free(t);
         gtls_conf_free(c);
     }
@@ -997,8 +1050,10 @@ int gtls_resumed(gtls_conn *t) {
     if (t->is_server) return t->resumed;
     br_ssl_session_parameters p;
     br_ssl_engine_get_session_parameters(t->eng, &p);
-    return t->offered && p.session_id_len == t->offered_len &&
-           memcmp(p.session_id, t->offered_id, t->offered_len) == 0;
+    int same = t->offered && p.session_id_len == t->offered_len &&
+               memcmp(p.session_id, t->offered_id, t->offered_len) == 0;
+    secure_zero(&p, sizeof p);           /* a copy of the master secret, on the stack */
+    return same;
 }
 
 int gtls_peer_ok(gtls_conn *t) {
@@ -1021,7 +1076,7 @@ int gtls_peer_ok(gtls_conn *t) {
             pthread_mutex_unlock(&c->mu);
         }
         t->saved = 1;
-        memset(&p, 0, sizeof p);
+        secure_zero(&p, sizeof p);
     }
     return ok;
 }
