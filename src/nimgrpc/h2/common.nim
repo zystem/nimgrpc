@@ -80,6 +80,30 @@ type
       ## it, or whose connection closed, leaves the queue at once. 0 means no limit. The chronos
       ## server has no queue and ignores it. Calls that are meant to stay open (streaming) hold
       ## their workers for as long as they last: for many of them use the chronos server.
+    maxQueuedBytes*: int = 256 * 1024 * 1024
+      ## The blocking server keeps what a call has sent (its request headers and the body bytes
+      ## that have arrived) until a worker reads it: while the call waits for a worker, or for the
+      ## rest of its body (a unary call gets its worker when its message is whole). A stream may
+      ## send up to 1 MiB before its handler reads any, so the number of waiting calls
+      ## (`maxQueuedCalls`) alone does not bound the memory they hold. This is the bound on all
+      ## of it, in bytes, for the whole server. A call that would pass it is refused with
+      ## REFUSED_STREAM before it is queued, or, if it is already waiting and its data takes the
+      ## server past the limit, reset the same way; the handler never ran, so a client of this
+      ## library sees UNAVAILABLE and sends a unary call again. `queueStats` shows the figures.
+      ## 0 means no limit. The chronos server reads at once and ignores it.
+    maxStreamingCalls*: int = 0
+      ## Streaming calls that may run at once (the handler has started and has not returned).
+      ## A streaming call holds its worker for as long as it lasts, so on the blocking server
+      ## a number of them can leave no worker for the unary calls; with this set (say to half
+      ## of `maxWorkers`) the rest are answered with RESOURCE_EXHAUSTED at once, and the
+      ## workers they would have held stay free. On the chronos server it caps the open streaming
+      ## handlers. 0 means no limit.
+    maxStreamingCallMs*: int = 0
+      ## The longest a streaming call may last, in place of `maxCallMs` for streaming calls:
+      ## 0 means `maxCallMs` applies to them as to every call, a positive number replaces it
+      ## (it may be larger than `maxCallMs`: streams that are meant to stay long), and -1 means
+      ## no limit for streaming calls whatever `maxCallMs` is. Past it the server resets the call
+      ## (the client sees CANCELLED), as with `maxCallMs`.
     maxConnectionBuffer*: int = 16 * 1024 * 1024
       ## Body bytes that handlers have queued on all the streams of one
       ## connection and the socket has not taken; a sender waits above it.

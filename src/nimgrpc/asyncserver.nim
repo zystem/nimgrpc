@@ -85,6 +85,7 @@ type
     ka: Keepalive
     policy: PingPolicy
     limits: Limits
+    streamingActive: int     ## streaming handlers that are running (`Limits.maxStreamingCalls`)
     errorHook: ErrorHook
     interceptors: seq[AsyncServerInterceptor]   ## the first added is the outermost
     h2: AsyncH2Server
@@ -289,8 +290,13 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
       return
   except H2Error:
     return
-  if s.limits.maxCallMs > 0 and (ctx.timeoutMs < 0 or ctx.timeoutMs > s.limits.maxCallMs):
-    st.setTimeout(s.limits.maxCallMs)  # the server's own limit; `ctx.timeoutMs` stays the client's
+  # The server's own limit on how long a call lasts: for a streaming call `maxStreamingCallMs`
+  # replaces `maxCallMs` (0: it does not, -1: streaming calls have none).
+  let isStreaming = ctx.path in s.methods and s.methods.getOrDefault(ctx.path).kind == mkStreaming
+  let cap = if isStreaming and s.limits.maxStreamingCallMs != 0: s.limits.maxStreamingCallMs
+            else: s.limits.maxCallMs
+  if cap > 0 and (ctx.timeoutMs < 0 or ctx.timeoutMs > cap):
+    st.setTimeout(cap)                 # the server's own limit; `ctx.timeoutMs` stays the client's
   else:
     st.setTimeout(ctx.timeoutMs, answer = true)   # the client's deadline: answer it with a status
   ctx.stream = st
@@ -308,6 +314,13 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
     call.finishCall(scUnimplemented, "unknown method " & ctx.path, @[])
     return
   let m = s.methods.getOrDefault(ctx.path)
+  var counted = false
+  if m.kind == mkStreaming and s.limits.maxStreamingCalls > 0:
+    if s.streamingActive >= s.limits.maxStreamingCalls:
+      call.finishCall(scResourceExhausted, "too many streaming calls", @[])
+      return
+    inc s.streamingActive
+    counted = true
   try:
     if s.interceptors.len == 0:
       await runMethod(m, ctx, call)
@@ -329,6 +342,7 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
   except CatchableError as e:
     if s.errorHook != nil: s.errorHook(ctx.path, e)
     call.finishCall(scUnknown, "internal error", ctx.trailers)
+  if counted: dec s.streamingActive
 
 # ---------------------------------------------------------------- server
 
