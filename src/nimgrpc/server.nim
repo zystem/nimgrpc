@@ -14,7 +14,7 @@
 ## message "internal error": the exception text may hold paths or queries and is
 ## not sent to the client. `setErrorHook` gives the operator the real exception.
 
-import std/[tables, strutils, algorithm]
+import std/[tables, strutils, algorithm, atomics]
 import ./status, ./wire, ./h2/blocking, ./compress/gzip
 export status, blocking.TlsConfig, blocking.tlsClientConfig, blocking.tlsServerConfig,
        blocking.TlsError, blocking.Keepalive, blocking.PingPolicy, blocking.Limits, blocking.CipherOrder,
@@ -102,6 +102,9 @@ type
     methods: Table[string, Method]
     maxMessage: int
     maxCallMs: int           ## `Limits.maxCallMs`
+    maxStreamingCalls: int   ## `Limits.maxStreamingCalls`
+    maxStreamingCallMs: int  ## `Limits.maxStreamingCallMs`
+    streaming: Atomic[int]   ## streaming handlers that are running
     errorHook: ErrorHook     ## read by workers without a lock: set before `start`
     interceptors: seq[Intercept]   ## the same; the first added is the outermost
 
@@ -309,8 +312,13 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
       return
   except H2Error:
     return
-  if reg.maxCallMs > 0 and (ctx.timeoutMs < 0 or ctx.timeoutMs > reg.maxCallMs):
-    st.setTimeout(reg.maxCallMs)       # the server's own limit; `ctx.timeoutMs` stays the client's
+  # The server's own limit on how long a call lasts: for a streaming call `maxStreamingCallMs`
+  # replaces `maxCallMs` (0: it does not, -1: streaming calls have none).
+  let isStreaming = ctx.path in reg.methods and reg.methods.getOrDefault(ctx.path).kind == mkStreaming
+  let cap = if isStreaming and reg.maxStreamingCallMs != 0: reg.maxStreamingCallMs
+            else: reg.maxCallMs
+  if cap > 0 and (ctx.timeoutMs < 0 or ctx.timeoutMs > cap):
+    st.setTimeout(cap)                 # the server's own limit; `ctx.timeoutMs` stays the client's
   else:
     st.setTimeout(ctx.timeoutMs, answer = true)   # the client's deadline: answer it with a status
   ctx.stream = st.addr
@@ -329,6 +337,15 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
     call.finishCall(scUnimplemented, "unknown method " & ctx.path, @[])
     return
   var m = reg.methods.getOrDefault(ctx.path)
+  var counted = false
+  if m.kind == mkStreaming and reg.maxStreamingCalls > 0:
+    # Streaming calls hold their workers for as long as they last: past the quota the rest are
+    # answered at once, and the workers they would have held stay for the unary calls.
+    if reg.streaming.fetchAdd(1) >= reg.maxStreamingCalls:
+      discard reg.streaming.fetchSub(1)
+      call.finishCall(scResourceExhausted, "too many streaming calls", @[])
+      return
+    counted = true
   try:
     if reg.interceptors.len == 0:
       runMethod(m, ctx, call)
@@ -346,6 +363,7 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
   except CatchableError as e:
     if reg.errorHook != nil: reg.errorHook(ctx.path, e)
     call.finishCall(scUnknown, "internal error", ctx.trailers)
+  if counted: discard reg.streaming.fetchSub(1)
 
 proc wholeRequest(headers: openArray[Header]; userData: pointer): int
     {.nimcall, gcsafe, raises: [].} =
@@ -379,6 +397,8 @@ proc newGrpcServer*(port = 0; address = "127.0.0.1"; maxWorkers = 256;
   result = GrpcServer()
   result.reg.maxMessage = maxMessage
   result.reg.maxCallMs = limits.maxCallMs
+  result.reg.maxStreamingCalls = limits.maxStreamingCalls
+  result.reg.maxStreamingCallMs = limits.maxStreamingCallMs
   result.h2 = newStreamServer(handle, result.reg.addr, Port(port), address,
                               maxWorkers, tls, keepalive, pingPolicy, limits, wholeRequest)
 
@@ -449,6 +469,11 @@ proc servicesIn*(handle: pointer): seq[string] {.gcsafe.} =
   serviceNamesOf(cast[ptr Registry](handle))
 
 proc port*(s: GrpcServer): int = s.h2.port.int
+
+proc queueStats*(s: GrpcServer): tuple[calls, bytes: int] =
+  ## Calls waiting for a worker, and the bytes held for the calls that have none (see
+  ## `Limits.maxQueuedBytes`): a gauge for monitoring, and what the limits bound.
+  s.h2.queueStats()
 
 proc start*(s: GrpcServer) =
   s.started = true

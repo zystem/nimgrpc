@@ -79,6 +79,17 @@ Set by default, check that they suit you:
       library sees UNAVAILABLE and sends a unary call again). Memory under load is about the
       number of running handlers times twice the size of a response, plus what the waiting
       calls hold ([threat-model.md](threat-model.md), "slow or stalled peer").
+- [ ] Blocking server: `Limits.maxQueuedBytes` (256 MiB) bounds, for the whole server, the bytes
+      that calls without a worker hold (request headers and body that has arrived: calls that
+      wait for a worker, and unary calls that wait for the rest of their message). Past it a
+      call is refused or reset with REFUSED_STREAM (it was not started; a client of this library
+      sees UNAVAILABLE and sends a unary call again). Set it to what the process can spare.
+      `srv.queueStats()` gives the waiting calls and these bytes: watch it.
+- [ ] Blocking server with long streaming calls: `Limits.maxStreamingCalls` (no quota by
+      default) caps the streaming handlers that run at once, so that they cannot hold every
+      worker (set it to about half of `maxWorkers`; the rest get RESOURCE_EXHAUSTED at once), and
+      `Limits.maxStreamingCallMs` (0: `maxCallMs` applies) gives streaming calls their own
+      time limit, longer or shorter than the one of the other calls, or none (-1).
 - [ ] `newHealth(maxWatches = 64)`, `newReflection(maxStreams = 16)` on the blocking server.
 - [ ] `pingPolicy`: off by default; set `minIntervalMs` to refuse clients that ping too often.
 - [ ] No rate limit of calls exists. Put one in front or in the handlers if you need it.
