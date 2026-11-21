@@ -68,9 +68,15 @@ type
   TlsConfig* = ref TlsConfigObj
     ## Trust anchors, our identity and policy. Immutable once in use (see the top of this module).
 
+  PeerState = enum
+    psPending     ## the handshake is not done: no application data moves yet
+    psVerified    ## ALPN is h2 and the peer is authenticated as required
+    psFailed      ## it is not: final, and the connection must be dropped
+
   TlsConnObj = object
     raw: GtlsConnP
-    checked: bool     ## ALPN and peer authentication verified
+    peer: PeerState
+    why: string       ## psFailed: the reason
   TlsConn* = ref TlsConnObj
 
 proc `=destroy`(c: TlsConfigObj) =
@@ -221,16 +227,33 @@ proc resumed*(t: TlsConn): bool =
 
 proc handshakeDone*(t: TlsConn): bool = (gtls_state(t.raw) and stSendApp) != 0
 
+proc settle(t: TlsConn) =
+  ## Moves a pending peer to verified or failed as soon as the handshake is done (ALPN must be
+  ## h2, the peer authenticated as required), or has failed with an error. Never raises, and
+  ## never goes back: a failed peer stays failed, however often it is asked.
+  if t.peer != psPending: return
+  if t.handshakeDone:
+    let p = gtls_alpn(t.raw)
+    if p == nil or p != "h2":
+      t.peer = psFailed
+      t.why = "peer did not negotiate ALPN h2"
+    elif gtls_peer_ok(t.raw) == 0:
+      t.peer = psFailed
+      t.why = "peer did not present a trusted certificate"
+    else:
+      t.peer = psVerified
+  elif t.isClosed and gtls_last_error(t.raw) != 0:
+    t.peer = psFailed                 # the handshake ended in an error: the engine says which
+    t.why = t.errorMessage
+
 proc checkPeer*(t: TlsConn) =
-  ## After the handshake, once: ALPN must be h2 and the peer authenticated as
-  ## required. Raises TlsError otherwise.
-  if t.checked or not t.handshakeDone: return
-  t.checked = true
-  let p = gtls_alpn(t.raw)
-  if p == nil or p != "h2":
-    raise newException(TlsError, "peer did not negotiate ALPN h2")
-  if gtls_peer_ok(t.raw) == 0:
-    raise newException(TlsError, "peer did not present a trusted certificate")
+  ## Raises TlsError if the peer failed: ALPN is not h2, the peer did not authenticate as
+  ## required, or the handshake ended in an error. Does nothing while the handshake is still
+  ## going on, and once the peer is verified. A failure is final: asking again raises again, and
+  ## `pullApp` and `pushApp` move no data for a peer that is not verified, so a caller that
+  ## ignored the exception (or calls this too late) still sends and receives nothing.
+  t.settle()
+  if t.peer == psFailed: raise newException(TlsError, t.why)
 
 proc pushRecords*(t: TlsConn; data: openArray[byte]): int =
   ## Feeds bytes from the network; returns how many were taken.
@@ -242,7 +265,10 @@ proc pushRecords*(t: TlsConn; data: openArray[byte]): int =
   off
 
 proc pullApp*(t: TlsConn; dst: var seq[byte]) =
-  ## Appends the plaintext received so far to `dst`.
+  ## Appends the plaintext received so far to `dst`: nothing until the peer is verified, and
+  ## TlsError for a peer that failed (see `checkPeer`).
+  t.checkPeer()
+  if t.peer != psVerified: return
   while true:
     let start = dst.len
     dst.setLenUninit(start + 16384)
@@ -252,7 +278,10 @@ proc pullApp*(t: TlsConn; dst: var seq[byte]) =
 
 proc pushApp*(t: TlsConn; data: openArray[byte]): int =
   ## Queues plaintext to send; returns how many bytes were taken (0 during the
-  ## handshake). Call `flush`, then `pullRecords`.
+  ## handshake, and for a peer that is not verified, or failed: nothing goes to a peer that did
+  ## not pass `checkPeer`). Call `flush`, then `pullRecords`.
+  t.settle()
+  if t.peer != psVerified: return 0
   var off = 0
   while off < data.len:
     let n = gtls_push_app(t.raw, data[off].unsafeAddr, csize_t(data.len - off)).int
