@@ -1201,6 +1201,8 @@ proc newStreamServer*(handler: StreamHandler; userData: pointer = nil;
   ## connections must speak TLS 1.2 with ALPN h2. `limits` caps streams,
   ## connections and queued bytes (see `Limits`). With `wholeRequest` a stream whose handler
   ## needs the whole body first gets its worker only when the body is there (see `WholeRequest`).
+  ## `tls` is in use from here on: its setters raise TlsError.
+  if tls != nil: tls.freeze()
   result = Server(handler: handler, userData: userData, maxWorkers: maxWorkers,
                   whole: wholeRequest,
                   tls: tls, ka: keepalive, policy: pingPolicy, limits: limits)
@@ -1384,7 +1386,9 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   ## first stream. Each address the name resolves to gets `connectTimeoutMs`
   ## to accept the TCP connection (a negative value waits as long as the
   ## system does); past it `TimeoutError` is raised. Resolving the name is not
-  ## covered: it blocks for as long as the resolver takes.
+  ## covered: it blocks for as long as the resolver takes. `tls` is in use from here on: its
+  ## setters raise TlsError.
+  if tls != nil: tls.freeze()
   let sock = connectAny(host, port, connectTimeoutMs)
   setTcpKeepalive(sock.getFd, keepalive.tcpSecs)
   result = newConn(sock, newClientSession(true, limits.maxHeaderListBytes), nil)

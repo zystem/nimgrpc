@@ -780,7 +780,9 @@ proc dial*(host: string; port: Port; tls: TlsConfig = nil; serverName = "";
   ## `host`). A failed handshake shows up as an error on the first stream.
   ## Each address gets `connectTimeoutMs` to accept the TCP connection (a
   ## negative value waits as long as the system does); past it the last
-  ## address's `AsyncTimeoutError` is raised.
+  ## address's `AsyncTimeoutError` is raised. `tls` is in use from here on: its setters raise
+  ## TlsError.
+  if tls != nil: tls.freeze()
   let addrs = interleaveFamilies(resolveTAddress(stripBrackets(host), port),
                                  proc (a: TransportAddress): bool = a.family == AddressFamily.IPv6)
   if addrs.len == 0: raise newException(TransportError, "cannot resolve " & host)
@@ -863,7 +865,9 @@ proc newAsyncStreamServer*(handler: AsyncStreamHandler; userData: pointer = nil;
                            tls: TlsConfig = nil; keepalive = Keepalive();
                            pingPolicy = PingPolicy(); limits = Limits()): AsyncH2Server =
   ## Listens right away; connections are served by the running event loop.
-  ## `limits` caps streams, connections and queued bytes (see `Limits`).
+  ## `limits` caps streams, connections and queued bytes (see `Limits`). `tls` is in use from
+  ## here on: its setters raise TlsError.
+  if tls != nil: tls.freeze()
   let s = AsyncH2Server(handler: handler, userData: userData, tls: tls,
                         ka: keepalive, policy: pingPolicy, limits: limits)
   proc accept(server: StreamServer; transp: StreamTransport) {.async: (raises: []).} =
