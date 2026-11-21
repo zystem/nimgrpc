@@ -312,7 +312,7 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
   if reg.maxCallMs > 0 and (ctx.timeoutMs < 0 or ctx.timeoutMs > reg.maxCallMs):
     st.setTimeout(reg.maxCallMs)       # the server's own limit; `ctx.timeoutMs` stays the client's
   else:
-    st.setTimeout(ctx.timeoutMs)
+    st.setTimeout(ctx.timeoutMs, answer = true)   # the client's deadline: answer it with a status
   ctx.stream = st.addr
   ctx.metadata = fromWire(st.headers)
   var call = ServerCall(st: st.addr, ctx: ctx.addr, maxMessage: reg.maxMessage,

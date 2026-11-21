@@ -292,7 +292,7 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
   if s.limits.maxCallMs > 0 and (ctx.timeoutMs < 0 or ctx.timeoutMs > s.limits.maxCallMs):
     st.setTimeout(s.limits.maxCallMs)  # the server's own limit; `ctx.timeoutMs` stays the client's
   else:
-    st.setTimeout(ctx.timeoutMs)
+    st.setTimeout(ctx.timeoutMs, answer = true)   # the client's deadline: answer it with a status
   ctx.stream = st
   ctx.metadata = fromWire(st.headers)
   let call = AsyncServerCall(st: st, ctx: ctx, maxMessage: s.maxMessage,
@@ -320,7 +320,10 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
         raise newGrpcError(scInternal, "an interceptor returned without calling proceed")
     call.finishCall(scOk, "", ctx.trailers)
   except CancelledError:
-    discard     # the call is over for the client; the stream is already closed
+    # The call is over for the client and its stream is closed, unless the client's deadline
+    # passed: that stream is still open, and the client is told.
+    if st.deadlinePassed and not st.isClosed:
+      call.finishCall(scDeadlineExceeded, "deadline exceeded", ctx.trailers)
   except GrpcError as e:
     call.finishCall(e.code, e.msg, ctx.trailers & e.trailers)
   except CatchableError as e:

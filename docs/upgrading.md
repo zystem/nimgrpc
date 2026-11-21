@@ -4,6 +4,10 @@ The latest release is supported ([SECURITY.md](../SECURITY.md)). Read the notes 
 
 General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new commit); rebuild nghttp2 if [building.md](building.md) names a new version; regenerate the code of your `.proto` files with the new `protoc-gen-nim` (generated code and the library are versioned together); run your tests.
 
+## Unreleased
+
+- **A server answers the client's deadline with DEADLINE_EXCEEDED**: when the `grpc-timeout` a client sent passes, the server ends the call with that status in trailers; before, it reset the stream with CANCEL, and a client that had not noticed its own deadline yet (gRPC's C core, with a very short one) reported CANCELLED. A handler sees the same errors as before (`ctx.isCancelled`, `ctx.checkCancelled()`, DEADLINE_EXCEEDED from `recv` and `send`). `Limits.maxCallMs` is unchanged: it resets the stream. Nothing to change in your code, unless you matched the reset (`stream reset with HTTP/2 error 8`) of a client's deadline.
+
 ## 0.7.0
 
 - **A client waits at most 20 s for a server that stays silent**: `ClientLimits.handshakeTimeoutMs` closes a connection whose server accepted the TCP connection and has not finished TLS and sent its first SETTINGS by then, and the call fails with UNAVAILABLE (before, a call with no deadline waited for ever). A server that is only slow to answer is not affected: the limit ends when its first SETTINGS arrives. Pass `limits = ClientLimits(handshakeTimeoutMs: 0)` to `dial` or `dialAsync` for the former behaviour.

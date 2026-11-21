@@ -42,6 +42,9 @@ type
     holdMax: int               ## server: > 0 while the stream waits for its whole body before
                                ## it gets a worker; the most body bytes it may wait with
     credited: int              ## bytes of `inbuf` whose stream window has been given back already
+    answerDeadline: bool       ## server: when the deadline passes the stream stays open, so the
+                               ## call layer can end it with DEADLINE_EXCEEDED (see `setTimeout`)
+    timedOut: bool             ## server: that deadline has passed
 
   ConnObj = object
     sock: Socket
@@ -777,12 +780,18 @@ proc closedError(c: ptr ConnObj; st: ptr StreamState; id: int32): ref H2StreamCl
 
 proc timeoutLocked(c: ptr ConnObj; id: int32): ref H2Timeout =
   if not c.closed and id in c.streams and not c.streamPtr(id).closed:
-    try:
-      c.sess.resetStream(id, CANCEL)
-      c.queueOutputLocked()
-    except CatchableError: discard
-    c.streamPtr(id).closed = true
-    c.streamPtr(id).errorCode = CANCEL
+    if c.streamPtr(id).answerDeadline:
+      # The client's own deadline, on a server: the stream stays open so that the call can end
+      # with a status. A reset says only CANCELLED, and a client that has not noticed its own
+      # deadline yet (gRPC's C core, with a very short one) reports that instead of the right code.
+      c.streamPtr(id).timedOut = true
+    else:
+      try:
+        c.sess.resetStream(id, CANCEL)
+        c.queueOutputLocked()
+      except CatchableError: discard
+      c.streamPtr(id).closed = true
+      c.streamPtr(id).errorCode = CANCEL
   newException(H2Timeout, "deadline exceeded on stream " & $id)
 
 proc sendLocked(c: ptr ConnObj; id: int32; head, data: openArray[byte]; endStream: bool;
@@ -794,6 +803,7 @@ proc sendLocked(c: ptr ConnObj; id: int32; head, data: openArray[byte]; endStrea
   while true:
     let s = c.streamPtr(id)          # re-read: the table may grow while we wait
     if s == nil or s.closed or c.closed: raise c.closedError(s, id)
+    if s.timedOut: raise newException(H2Timeout, "deadline exceeded on stream " & $id)
     if s.outEnded: raise newException(H2Error, "stream " & $id & ": body already ended")
     var room = maxStreamBuffer - c.sess.buffered(id)
     if c.maxBuffer > 0: room = min(room, c.maxBuffer - c.sess.queuedBytes)
@@ -832,16 +842,25 @@ proc recvLocked(c: ptr ConnObj; id: int32; buf: var seq[byte];
       return true
     if st.inEnded: return false
     if st.closed: raise c.closedError(st, id)
+    if st.timedOut: raise newException(H2Timeout, "deadline exceeded on stream " & $id)
     if not c.waitLocked(hasDeadline, deadline):
       raise c.timeoutLocked(id)
 
 # ------------------------------------------------------------ server streams
 
-proc setTimeout*(st: var ServerStream; ms: int) =
-  ## Bounds every later blocking call on this stream.
+proc setTimeout*(st: var ServerStream; ms: int; answer = false) =
+  ## Bounds every later blocking call on this stream. When the deadline passes, the call that
+  ## waits raises H2Timeout and the stream is reset with CANCEL, unless `answer` (the deadline
+  ## is the client's own): then the stream stays open, later reads and writes of the body raise
+  ## H2Timeout, and the response can still end with trailers (DEADLINE_EXCEEDED).
   if ms >= 0:
     st.deadline = deadlineIn(ms)
     st.hasDeadline = true
+    if answer:
+      let c = st.conn
+      acquire(c.lock)
+      if st.id in c.streams: c.streamPtr(st.id).answerDeadline = true
+      release(c.lock)
 
 proc recvData*(st: var ServerStream; buf: var seq[byte]): bool =
   ## Blocks for the next part of the request body; false at its end.

@@ -44,7 +44,9 @@ type
     outEnded: bool             ## we sent END_STREAM (or trailers)
     responded: bool            ## server: response HEADERS submitted
     closed: bool
-    timedOut: bool             ## closed by its deadline
+    timedOut: bool             ## its deadline passed (the stream is closed too, unless `answerDeadline`)
+    answerDeadline: bool       ## server: at the deadline the stream stays open, so the call can end
+                               ## with DEADLINE_EXCEEDED (see `setTimeout`)
     released: bool
     errorCode: uint32          ## RST_STREAM / GOAWAY code, 0 on a clean close
     hasDeadline: bool
@@ -179,6 +181,12 @@ proc onDeadline(st: AsyncH2Stream) =
   if st.closed: return
   st.timedOut = true
   let c = st.conn
+  if st.answerDeadline:
+    # The client's own deadline, on a server: only the handler is cancelled, and the call layer
+    # answers with a status. A reset says only CANCELLED, and a client that has not noticed its
+    # own deadline yet (gRPC's C core, with a very short one) reports that instead of the right code.
+    st.cancelHandler()
+    return
   if not c.closed and not st.released:
     try:
       c.sess.resetStream(st.id, CANCEL)
@@ -538,9 +546,16 @@ template checkGone(st: AsyncH2Stream) =
   if st.timedOut: raise st.timeoutError
   if st.closed or st.conn.closed: raise st.closedError
 
-proc setTimeout*(st: AsyncH2Stream; ms: int) =
-  ## Server: the stream is reset with CANCEL `ms` from now (the client's
-  ## grpc-timeout); later calls raise H2Timeout and the handler is cancelled.
+template checkOpen(st: AsyncH2Stream) =
+  ## For what ends the response: allowed after the client's deadline passed (`answerDeadline`).
+  if st.closed or st.conn.closed: raise st.closedError
+
+proc setTimeout*(st: AsyncH2Stream; ms: int; answer = false) =
+  ## Server: `ms` from now the stream is reset with CANCEL, later calls raise H2Timeout and the
+  ## handler is cancelled. With `answer` (the deadline is the client's own) the stream is not
+  ## reset: the handler is cancelled, later reads and writes raise H2Timeout, and the response
+  ## can still end with a status (`sendHeaders`, `sendTrailers`).
+  st.answerDeadline = answer
   st.armDeadline(ms)
 
 proc isClosed*(st: AsyncH2Stream): bool =
@@ -654,7 +669,7 @@ proc ended*(st: AsyncH2Stream): bool = st.inEnded and st.inbuf.len == 0
 
 proc sendHeaders*(st: AsyncH2Stream; headers: seq[Header]; endStream = false) =
   ## Server: the response HEADERS. With `endStream` nothing else follows.
-  st.checkGone()
+  st.checkOpen()
   if st.responded: raise newException(H2Error, "response HEADERS already sent")
   let c = st.conn
   c.sess.submitResponse(st.id, headers, endStream)
@@ -664,7 +679,7 @@ proc sendHeaders*(st: AsyncH2Stream; headers: seq[Header]; endStream = false) =
 
 proc sendTrailers*(st: AsyncH2Stream; trailers: seq[Header]) =
   ## Ends the body with a trailing HEADERS block.
-  st.checkGone()
+  st.checkOpen()
   if st.outEnded: raise newException(H2Error, "response already ended")
   st.conn.sess.sendTrailers(st.id, trailers)
   st.outEnded = true
