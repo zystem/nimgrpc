@@ -1,7 +1,11 @@
 ## TLS 1.2 with ALPN "h2" on BearSSL, I/O-free (see gtls.c).
 ##
 ## A `TlsConfig` is built once and shared read-only by every connection that
-## uses it. The configuration itself (trust anchors, identity, resumable
+## uses it. It is built with the setters (`addTrustedCa`, `setIdentity`, ...) and then
+## in use: the first connection made from it, `share`, or a server or channel that is
+## given it ends the building, and a setter after that raises `TlsError`. A connection
+## points into the arrays of the configuration, so changing them under it would leave
+## it with freed memory. To change a configuration, build a new one. The configuration itself (trust anchors, identity, resumable
 ## sessions) is counted with atomic operations and a connection holds a count
 ## of its own, so it outlives them. The `TlsConfig` object that points at it is
 ## a Nim `ref`, and a Nim `ref` must not be copied between threads (ORC counts
@@ -28,9 +32,11 @@ proc gtls_conf_error(c: GtlsConfP): cstring
 proc gtls_conf_add_ca(c: GtlsConfP; pem: ptr byte; len: csize_t): clong
 proc gtls_conf_set_identity(c: GtlsConfP; chain: ptr byte; chainLen: csize_t;
                             key: ptr byte; keyLen: csize_t): cint
-proc gtls_conf_require_client_cert(c: GtlsConfP; on: cint)
-proc gtls_conf_set_cipher_order(c: GtlsConfP; order: cint)
-proc gtls_conf_set_lifetime(c: GtlsConfP; seconds: cint)
+proc gtls_conf_require_client_cert(c: GtlsConfP; on: cint): cint
+proc gtls_conf_set_cipher_order(c: GtlsConfP; order: cint): cint
+proc gtls_conf_set_lifetime(c: GtlsConfP; seconds: cint): cint
+proc gtls_conf_freeze(c: GtlsConfP)
+proc gtls_conf_frozen(c: GtlsConfP): cint
 proc gtls_conf_retain(c: GtlsConfP)
 proc gtls_conf_free(c: GtlsConfP)
 proc gtls_client_new(c: GtlsConfP; serverName: cstring): GtlsConnP
@@ -60,7 +66,7 @@ type
   TlsConfigObj = object
     raw: GtlsConfP
   TlsConfig* = ref TlsConfigObj
-    ## Trust anchors, our identity and policy. Immutable once in use.
+    ## Trust anchors, our identity and policy. Immutable once in use (see the top of this module).
 
   TlsConnObj = object
     raw: GtlsConnP
@@ -94,13 +100,29 @@ proc newTlsConfig*(): TlsConfig =
 proc fail(c: TlsConfig; what: string) {.noreturn.} =
   raise newException(TlsError, what & ": " & $gtls_conf_error(c.raw))
 
+proc checkBuilding(c: TlsConfig) =
+  ## Raises TlsError once the configuration is in use.
+  if gtls_conf_frozen(c.raw) != 0:
+    raise newException(TlsError, "the TlsConfig is in use (a connection, share, a server or " &
+                       "a channel has it) and cannot change: build a new one")
+
+proc freeze*(c: TlsConfig) =
+  ## Ends the building: the setters raise TlsError from now on. Servers and channels call this
+  ## on the configuration they are given; a connection and `share` do it as well.
+  if c != nil: gtls_conf_freeze(c.raw)
+
 proc addTrustedCa*(c: TlsConfig; pem: string) =
-  ## Certificates (PEM) that may sign the peer's chain.
+  ## Certificates (PEM) that may sign the peer's chain. All of them are added, or, if one is
+  ## not valid, none. Raises TlsError once the configuration is in use.
+  c.checkBuilding()
   if gtls_conf_add_ca(c.raw, pem.bytesOf, pem.len.csize_t) < 0: c.fail("CA")
 
 proc setIdentity*(c: TlsConfig; certChainPem, privateKeyPem: string) =
   ## Our certificate chain (leaf first) and its key (RSA or EC; PKCS#1, SEC1
-  ## or PKCS#8, unencrypted).
+  ## or PKCS#8, unencrypted). The chain and the key are checked together and replace the
+  ## identity the configuration had (a second call does not add to the first); if either is not
+  ## valid the configuration is unchanged. Raises TlsError once the configuration is in use.
+  c.checkBuilding()
   if gtls_conf_set_identity(c.raw, certChainPem.bytesOf, certChainPem.len.csize_t,
                             privateKeyPem.bytesOf, privateKeyPem.len.csize_t) != 0:
     c.fail("identity")
@@ -110,7 +132,8 @@ proc setCipherOrder*(c: TlsConfig; order: CipherOrder) =
   ## prefers; on a client it is the order offered. `coAuto` (the default)
   ## picks AES-GCM where the CPU does it in hardware, which is faster, and
   ## ChaCha20-Poly1305 elsewhere, where BearSSL's portable AES is slow.
-  gtls_conf_set_cipher_order(c.raw, cint(ord(order)))
+  c.checkBuilding()
+  if gtls_conf_set_cipher_order(c.raw, cint(ord(order))) != 0: c.checkBuilding()
 
 proc share*(c: TlsConfig): TlsConfig =
   ## Another object for the same configuration, with the same resumable
@@ -133,11 +156,13 @@ proc setSessionLifetime*(c: TlsConfig; seconds: int) =
   ## resumption off. A resumed session is not checked against the certificate
   ## again, so this is also how long a revoked or expired certificate still
   ## works for a client that already has a session. Default ten minutes.
-  gtls_conf_set_lifetime(c.raw, cint(seconds))
+  c.checkBuilding()
+  if gtls_conf_set_lifetime(c.raw, cint(seconds)) != 0: c.checkBuilding()
 
 proc requireClientCert*(c: TlsConfig; on = true) =
   ## Server: refuse clients without a certificate that chains to a trusted CA.
-  gtls_conf_require_client_cert(c.raw, cint(on))
+  c.checkBuilding()
+  if gtls_conf_require_client_cert(c.raw, cint(on)) != 0: c.checkBuilding()
 
 proc tlsClientConfig*(caPem: string; certChainPem = ""; privateKeyPem = "";
                       cipherOrder = coAuto): TlsConfig =

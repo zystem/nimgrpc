@@ -178,6 +178,11 @@ suite "troubleshooting page":
     let badCa = failure:
       discard tlsClientConfig("not a certificate")
     shows(badCa, "TlsError", "CA: no certificate in CA bundle")
+    let inUse = failure:
+      let held = tlsServerConfig(pem"server.pem", pem"server.key")
+      discard held.share            # a second owner: the building is over
+      held.setSessionLifetime(0)
+    shows(inUse, "TlsError", "the TlsConfig is in use (a connection, share, a server or a channel has it)")
 
 suite "supported-versions page":
   let versions = readFile(root / "docs" / "supported-versions.md")

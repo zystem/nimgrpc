@@ -92,6 +92,8 @@ failures marked **(run)** happen and compares the text.
 |---|---|---|
 | `identity: no certificate in chain` **(run)**, `identity: REASON` | `tlsServerConfig` or `tlsClientConfig` got a certificate or a key that is not PEM, or a key that does not belong to the certificate. | Pass the contents of the files (`readFile`), not their paths; RSA or EC keys. |
 | `CA: no certificate in CA bundle` **(run)**, `CA: REASON` | The CA text holds no PEM certificate. | As above. |
+| `the TlsConfig is in use (a connection, share, a server or a channel has it) and cannot change: build a new one` **(run)** | A setter (`addTrustedCa`, `setIdentity`, `setCipherOrder`, `setSessionLifetime`, `requireClientCert`) was called on a `TlsConfig` that a connection, `share`, a server or a channel already holds. A connection points into the configuration, so it is not changed under it. | Make every setting before you hand the config out, or build a new `TlsConfig`. To change a running server's certificate, start a new server with the new config and stop the old one. |
+| `identity: unsupported private key`, `identity: out of memory`, `CA: out of memory` | The key in the PEM is not RSA or EC, or the C side could not allocate. A setter that fails changes nothing: the config is as it was. | Use an RSA or EC key, or free memory. |
 | `client session: REASON`, `server session: REASON` | A TLS session could not be made from the config. | A client needs a CA, a server a certificate and a key. |
 | `out of memory` | The C side could not allocate. | The process is out of memory. |
 

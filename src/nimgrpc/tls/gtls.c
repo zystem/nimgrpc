@@ -3,7 +3,10 @@
  *
  * A gtls_conf holds what is shared by many connections and never changes once
  * built: trust anchors, our certificate chain and private key, and whether a
- * client certificate is required. A gtls_conn is one TLS session; bytes go in
+ * client certificate is required. Once a connection is made from it, or it is
+ * shared or handed to a server (`frozen`), its setters refuse: a connection
+ * points into the arrays of the configuration, and changing them under it
+ * would leave it with freed or half-written memory. A gtls_conn is one TLS session; bytes go in
  * and out through four buffers (records in, records out, plaintext in,
  * plaintext out) and the conn never touches a socket.
  *
@@ -139,6 +142,7 @@ typedef struct {
     int cipher_order;              /* 0: by the CPU, 1: AES-GCM first, 2: ChaCha20 first */
     int lifetime;                  /* seconds a session may be resumed; 0: never */
     int refs;                      /* owners: the TlsConfig handles and the connections made from it (atomic) */
+    int frozen;                    /* set once the configuration is in use (atomic); the setters then refuse */
     pthread_mutex_t mu;            /* guards `cache` (creation) and the saved client session */
     struct gtls_cache *cache;      /* server: sessions that may be resumed */
     int have_session;              /* client: the last verified session ... */
@@ -169,19 +173,49 @@ gtls_conf *gtls_conf_new(void) {
 
 const char *gtls_conf_error(gtls_conf *c) { return c->err; }
 
-void gtls_conf_set_cipher_order(gtls_conf *c, int order) { c->cipher_order = order; }
+/* The building phase is over: connections, `share` and servers call this. Nothing writes
+ * to the configuration's own fields after it. */
+void gtls_conf_freeze(gtls_conf *c) {
+    if (c) __atomic_store_n(&c->frozen, 1, __ATOMIC_RELEASE);
+}
 
-void gtls_conf_set_lifetime(gtls_conf *c, int seconds) { c->lifetime = seconds < 0 ? 0 : seconds; }
+int gtls_conf_frozen(gtls_conf *c) { return __atomic_load_n(&c->frozen, __ATOMIC_ACQUIRE); }
+
+/* The setters return -1 on a frozen configuration, and then write nothing, not even the error text (another thread may be reading it). */
+int gtls_conf_set_cipher_order(gtls_conf *c, int order) {
+    if (gtls_conf_frozen(c)) return -1;
+    c->cipher_order = order;
+    return 0;
+}
+
+int gtls_conf_set_lifetime(gtls_conf *c, int seconds) {
+    if (gtls_conf_frozen(c)) return -1;
+    c->lifetime = seconds < 0 ? 0 : seconds;
+    return 0;
+}
 
 static void dn_append(void *ctx, const void *buf, size_t len) {
     gbuf_add((gbuf *)ctx, buf, len);
 }
 
-/* Adds every certificate in `pem` as a trust anchor. Returns the count, or -1. */
+static void free_ta(br_x509_trust_anchor *ta) {
+    free(ta->dn.data);
+    if (ta->pkey.key_type == BR_KEYTYPE_RSA) {
+        free(ta->pkey.key.rsa.n);
+        free(ta->pkey.key.rsa.e);
+    } else {
+        free(ta->pkey.key.ec.q);
+    }
+}
+
+/* Adds every certificate in `pem` as a trust anchor. Returns the count, or -1; on -1 nothing
+ * was added (the certificates are collected first and published together). */
 long gtls_conf_add_ca(gtls_conf *c, const unsigned char *pem, size_t len) {
+    if (gtls_conf_frozen(c)) return -1;
     pem_obj *objs;
     long n = decode_pem(pem, len, &objs), added = 0;
     if (n < 0) { strcpy(c->err, "invalid PEM in CA bundle"); return -1; }
+    br_x509_trust_anchor *nta = NULL;
     for (long i = 0; i < n; i++) {
         if (!is_cert_name(objs[i].name)) continue;
         br_x509_decoder_context dc;
@@ -193,56 +227,108 @@ long gtls_conf_add_ca(gtls_conf *c, const unsigned char *pem, size_t len) {
             free(dn.buf);
             snprintf(c->err, sizeof c->err, "CA certificate %ld: decode error %d",
                      i, br_x509_decoder_last_error(&dc));
-            free_pem(objs, n);
-            return -1;
+            goto fail;
         }
-        br_x509_trust_anchor *nt = realloc(c->tas, (c->ta_num + 1) * sizeof *nt);
-        if (!nt) { free(dn.buf); free_pem(objs, n); return -1; }
-        c->tas = nt;
-        br_x509_trust_anchor *ta = &c->tas[c->ta_num];
+        br_x509_trust_anchor *t = realloc(nta, (added + 1) * sizeof *t);
+        if (!t) { free(dn.buf); strcpy(c->err, "out of memory"); goto fail; }
+        nta = t;
+        br_x509_trust_anchor *ta = &nta[added];
         memset(ta, 0, sizeof *ta);
         ta->dn.data = dn.buf;
         ta->dn.len = dn.len;
         ta->flags = br_x509_decoder_isCA(&dc) ? BR_X509_TA_CA : 0;
         ta->pkey.key_type = pk->key_type;
+        added++;      /* counted now, so that `fail` frees what is half made */
+        int ok;
         if (pk->key_type == BR_KEYTYPE_RSA) {
             ta->pkey.key.rsa.n = dupmem(pk->key.rsa.n, pk->key.rsa.nlen);
             ta->pkey.key.rsa.nlen = pk->key.rsa.nlen;
             ta->pkey.key.rsa.e = dupmem(pk->key.rsa.e, pk->key.rsa.elen);
             ta->pkey.key.rsa.elen = pk->key.rsa.elen;
+            ok = ta->pkey.key.rsa.n && ta->pkey.key.rsa.e;
         } else {
             ta->pkey.key.ec.curve = pk->key.ec.curve;
             ta->pkey.key.ec.q = dupmem(pk->key.ec.q, pk->key.ec.qlen);
             ta->pkey.key.ec.qlen = pk->key.ec.qlen;
+            ok = ta->pkey.key.ec.q != NULL;
         }
-        c->ta_num++;
-        added++;
+        if (!ok || !ta->dn.data) { strcpy(c->err, "out of memory"); goto fail; }
     }
     free_pem(objs, n);
     if (added == 0) { strcpy(c->err, "no certificate in CA bundle"); return -1; }
+    br_x509_trust_anchor *all = realloc(c->tas, (c->ta_num + added) * sizeof *all);
+    if (!all) {
+        for (long k = 0; k < added; k++) free_ta(&nta[k]);
+        free(nta);
+        strcpy(c->err, "out of memory");
+        return -1;
+    }
+    memcpy(all + c->ta_num, nta, added * sizeof *nta);
+    c->tas = all;
+    c->ta_num += added;
+    free(nta);
     return added;
+fail:
+    for (long k = 0; k < added; k++) free_ta(&nta[k]);
+    free(nta);
+    free_pem(objs, n);
+    return -1;
 }
 
-/* Our certificate chain (leaf first) and its private key. Returns 0 or -1. */
+static void free_chain(br_x509_certificate *chain, size_t n) {
+    for (size_t i = 0; i < n; i++) free(chain[i].data);
+    free(chain);
+}
+
+static size_t key_bytes(int key_type, const br_rsa_private_key *rsa, const br_ec_private_key *ec) {
+    return key_type == BR_KEYTYPE_RSA
+        ? rsa->plen + rsa->qlen + rsa->dplen + rsa->dqlen + rsa->iqlen
+        : ec->xlen;
+}
+
+/* Our certificate chain (leaf first) and its private key. Returns 0 or -1. The chain and the
+ * key are decoded and checked first and replace the ones in use together: on -1 the
+ * configuration is as it was, and a second call replaces the identity, it does not add to it. */
 int gtls_conf_set_identity(gtls_conf *c, const unsigned char *chain_pem, size_t chain_len,
                            const unsigned char *key_pem, size_t key_len) {
+    if (gtls_conf_frozen(c)) return -1;
     pem_obj *objs;
+    br_x509_certificate *nchain = NULL;
+    size_t nlen = 0;
+    br_rsa_private_key nrsa;
+    br_ec_private_key nec;
+    unsigned char *nkey = NULL;
+    int ntype = 0;
+    memset(&nrsa, 0, sizeof nrsa);
+    memset(&nec, 0, sizeof nec);
+
     long n = decode_pem(chain_pem, chain_len, &objs);
     if (n < 0) { strcpy(c->err, "invalid PEM in certificate chain"); return -1; }
     for (long i = 0; i < n; i++) {
         if (!is_cert_name(objs[i].name)) continue;
-        br_x509_certificate *nc = realloc(c->chain, (c->chain_len + 1) * sizeof *nc);
-        if (!nc) { free_pem(objs, n); return -1; }
-        c->chain = nc;
-        c->chain[c->chain_len].data = dupmem(objs[i].data, objs[i].len);
-        c->chain[c->chain_len].data_len = objs[i].len;
-        c->chain_len++;
+        unsigned char *d = dupmem(objs[i].data, objs[i].len);
+        br_x509_certificate *t = realloc(nchain, (nlen + 1) * sizeof *t);
+        if (t) nchain = t;
+        if (!d || !t) {
+            free(d);
+            free_chain(nchain, nlen);
+            free_pem(objs, n);
+            strcpy(c->err, "out of memory");
+            return -1;
+        }
+        nchain[nlen].data = d;
+        nchain[nlen].data_len = objs[i].len;
+        nlen++;
     }
     free_pem(objs, n);
-    if (c->chain_len == 0) { strcpy(c->err, "no certificate in chain"); return -1; }
+    if (nlen == 0) { strcpy(c->err, "no certificate in chain"); return -1; }
 
     n = decode_pem(key_pem, key_len, &objs);
-    if (n < 0) { strcpy(c->err, "invalid PEM in private key"); return -1; }
+    if (n < 0) {
+        free_chain(nchain, nlen);
+        strcpy(c->err, "invalid PEM in private key");
+        return -1;
+    }
     int found = 0;
     for (long i = 0; i < n && !found; i++) {
         const char *nm = objs[i].name;
@@ -254,48 +340,69 @@ int gtls_conf_set_identity(gtls_conf *c, const unsigned char *chain_pem, size_t 
         int err = br_skey_decoder_last_error(&sk);
         if (err != 0) {
             snprintf(c->err, sizeof c->err, "private key decode error %d", err);
-            free_pem(objs, n);
-            return -1;
+            goto fail;
         }
-        c->key_type = br_skey_decoder_key_type(&sk);
-        if (c->key_type == BR_KEYTYPE_RSA) {
+        ntype = br_skey_decoder_key_type(&sk);
+        if (ntype == BR_KEYTYPE_RSA) {
             const br_rsa_private_key *k = br_skey_decoder_get_rsa(&sk);
             size_t tot = k->plen + k->qlen + k->dplen + k->dqlen + k->iqlen;
-            unsigned char *m = malloc(tot), *p = m;
-            if (!m) { free_pem(objs, n); return -1; }
-            c->rsa = *k;
-#define CP(f, l) memcpy(p, k->f, k->l); c->rsa.f = p; p += k->l;
+            unsigned char *m = malloc(tot ? tot : 1), *p = m;
+            if (!m) { strcpy(c->err, "out of memory"); goto fail; }
+            nrsa = *k;
+#define CP(f, l) memcpy(p, k->f, k->l); nrsa.f = p; p += k->l;
             CP(p, plen) CP(q, qlen) CP(dp, dplen) CP(dq, dqlen) CP(iq, iqlen)
 #undef CP
-            c->key_mem = m;
-        } else {
+            nkey = m;
+        } else if (ntype == BR_KEYTYPE_EC) {
             const br_ec_private_key *k = br_skey_decoder_get_ec(&sk);
-            c->ec = *k;
-            c->key_mem = dupmem(k->x, k->xlen);
-            c->ec.x = c->key_mem;
+            nec = *k;
+            nkey = dupmem(k->x, k->xlen);
+            if (!nkey) { strcpy(c->err, "out of memory"); goto fail; }
+            nec.x = nkey;
+        } else {
+            strcpy(c->err, "unsupported private key");
+            goto fail;
         }
         found = 1;
     }
+    for (long i = 0; i < n; i++) memset(objs[i].data, 0, objs[i].len);   /* the DER of the key */
     free_pem(objs, n);
-    if (!found) { strcpy(c->err, "no private key in PEM"); return -1; }
+    if (!found) {
+        free_chain(nchain, nlen);
+        strcpy(c->err, "no private key in PEM");
+        return -1;
+    }
+    /* publish: the old identity goes, the new one is whole */
+    free_chain(c->chain, c->chain_len);
+    if (c->key_mem) {
+        memset(c->key_mem, 0, key_bytes(c->key_type, &c->rsa, &c->ec));
+        free(c->key_mem);
+    }
+    c->chain = nchain;
+    c->chain_len = nlen;
+    c->key_type = ntype;
+    c->rsa = nrsa;
+    c->ec = nec;
+    c->key_mem = nkey;
     return 0;
+fail:
+    if (nkey) { memset(nkey, 0, key_bytes(ntype, &nrsa, &nec)); free(nkey); }
+    for (long i = 0; i < n; i++) memset(objs[i].data, 0, objs[i].len);
+    free_pem(objs, n);
+    free_chain(nchain, nlen);
+    return -1;
 }
 
-void gtls_conf_require_client_cert(gtls_conf *c, int on) { c->require_client_cert = on; }
+int gtls_conf_require_client_cert(gtls_conf *c, int on) {
+    if (gtls_conf_frozen(c)) return -1;
+    c->require_client_cert = on;
+    return 0;
+}
 
 static void cache_free(struct gtls_cache *k);
 
 static void conf_destroy(gtls_conf *c) {
-    for (size_t i = 0; i < c->ta_num; i++) {
-        br_x509_trust_anchor *ta = &c->tas[i];
-        free(ta->dn.data);
-        if (ta->pkey.key_type == BR_KEYTYPE_RSA) {
-            free(ta->pkey.key.rsa.n);
-            free(ta->pkey.key.rsa.e);
-        } else {
-            free(ta->pkey.key.ec.q);
-        }
-    }
+    for (size_t i = 0; i < c->ta_num; i++) free_ta(&c->tas[i]);
     free(c->tas);
     cache_free(c->cache);
     pthread_mutex_destroy(&c->mu);
@@ -315,7 +422,9 @@ static void conf_destroy(gtls_conf *c) {
 
 /* An owner more: a handle made by `share`, or a connection. The count is atomic, so owners in different threads need no lock of ours. */
 void gtls_conf_retain(gtls_conf *c) {
-    if (c) __atomic_fetch_add(&c->refs, 1, __ATOMIC_RELAXED);
+    if (!c) return;
+    gtls_conf_freeze(c);          /* a second owner: the setters are over */
+    __atomic_fetch_add(&c->refs, 1, __ATOMIC_RELAXED);
 }
 
 /* An owner less; the last one frees the configuration (and so the trust anchors, the identity and the sessions that connections made from it still use are never freed under them). */
@@ -718,6 +827,7 @@ static void setup_common(gtls_conn *t, gtls_conf *c) {
  * against its dNSName entries and CN, an IP address against its iPAddress entries) and sent
  * as SNI unless it is an IP address. Returns NULL on error. */
 gtls_conn *gtls_client_new(gtls_conf *c, const char *server_name) {
+    gtls_conf_freeze(c);          /* before anything is read from it */
     if (c->ta_num == 0) { strcpy(c->err, "client needs trust anchors"); return NULL; }
     gtls_conn *t = calloc(1, sizeof *t);
     if (!t) return NULL;
@@ -772,6 +882,7 @@ gtls_conn *gtls_client_new(gtls_conf *c, const char *server_name) {
 
 /* A server session. Returns NULL on error. */
 gtls_conn *gtls_server_new(gtls_conf *c) {
+    gtls_conf_freeze(c);
     if (c->chain_len == 0) { strcpy(c->err, "server needs a certificate and key"); return NULL; }
     gtls_conn *t = calloc(1, sizeof *t);
     if (!t) return NULL;

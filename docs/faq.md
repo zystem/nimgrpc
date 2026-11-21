@@ -79,7 +79,8 @@ before and after decompression. For more, stream.
 service, then `srv.stop(graceMs = 5000)`: GOAWAY first, running calls get the grace.
 
 **Can I change a server's certificate without a restart?** No call for it exists. Make a new
-server with the new `TlsConfig` and stop the old one.
+server with the new `TlsConfig` and stop the old one. A `TlsConfig` cannot change once a
+connection, `share`, a server or a channel has it: its setters raise `TlsError`.
 
 **Is a channel or a server safe to use from several threads?** A blocking channel: yes, calls
 from several threads share its connection. A chronos channel and server belong to the thread
