@@ -104,22 +104,32 @@ proc initReader*(data: openArray[byte]): PbReader =
 
 proc atEnd*(r: PbReader): bool = r.pos >= r.len
 
+const maxFieldNumber* = (1 shl 29) - 1
+  ## The largest field number Protobuf allows (2^29 - 1).
+
 proc getVarint*(r: var PbReader): uint64 =
+  ## Up to ten bytes; the tenth may only be 0 or 1, as in protobuf-go and the C++ runtime. A
+  ## larger one does not fit in 64 bits, and used to be cut to its low bit without a word.
   var shift = 0
   while true:
     if r.pos >= r.len: pbError("truncated varint")
     if shift > 63: pbError("varint too long")
     let b = r.data[r.pos]
     inc r.pos
+    if shift == 63 and b > 1: pbError("varint too long")
     result = result or (uint64(b and 0x7f) shl shift)
     if b < 0x80: return
     shift += 7
 
 proc getTag*(r: var PbReader; field: var int; wt: var WireType) =
+  ## Field numbers go from 1 to `maxFieldNumber`; wire types 6 and 7 do not exist. protobuf-go
+  ## reads field numbers up to 2^31 - 1 (as unknown fields) and leaves the wire type to its
+  ## caller; both are invalid Protobuf, and this decoder refuses them.
   let t = r.getVarint()
-  field = int(t shr 3)
+  let num = t shr 3
   let w = int(t and 7)
-  if field == 0 or w > 5: pbError("invalid tag")
+  if num == 0 or num > uint64(maxFieldNumber) or w > 5: pbError("invalid tag")
+  field = int(num)
   wt = WireType(w)
 
 proc getFixed32*(r: var PbReader): uint32 =

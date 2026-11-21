@@ -1,0 +1,25 @@
+# varints
+00
+7f
+80 01
+ff ff ff ff ff ff ff ff ff 01
+ff ff ff ff ff ff ff ff ff 02
+ff ff ff ff ff ff ff ff ff 7f
+ff ff ff ff ff ff ff ff ff 81 00
+80 00
+80 80 80 80 80 80 80 80 80 00
+80 80 80 80 80 80 80 80 80 80 00
+80 80 80 80 80 80 80 80 80 01
+80 80 80 80 80 80 80 80 80 02
+# tags: field 1 wt 0, field 2^29-1 wt 0, field 2^29 wt 0, field 2^31-1, field 2^31, big
+08
+f8 ff ff ff 0f
+80 80 80 80 10
+f8 ff ff ff ff 03
+80 80 80 80 80 20
+f8 ff ff ff ff ff ff ff ff 01
+# wire types 6 and 7, field 0
+0e
+0f
+00
+07
