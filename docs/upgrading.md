@@ -7,6 +7,7 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 ## Unreleased
 
 - **A server answers the client's deadline with DEADLINE_EXCEEDED**: when the `grpc-timeout` a client sent passes, the server ends the call with that status in trailers; before, it reset the stream with CANCEL, and a client that had not noticed its own deadline yet (gRPC's C core, with a very short one) reported CANCELLED. A handler sees the same errors as before (`ctx.isCancelled`, `ctx.checkCancelled()`, DEADLINE_EXCEEDED from `recv` and `send`). `Limits.maxCallMs` is unchanged: it resets the stream. Nothing to change in your code, unless you matched the reset (`stream reset with HTTP/2 error 8`) of a client's deadline.
+- **The blocking server refuses calls past `Limits.maxQueuedCalls` (1024 by default)**: calls that wait for a worker used to queue without limit. Past 256 running handlers plus 1024 waiting, a new call is refused (REFUSED_STREAM; a client of this library sees UNAVAILABLE and sends a unary call again). Nothing to change unless you keep more than that many calls open on a blocking server: raise `maxQueuedCalls` (0 means no limit) or use the chronos server.
 
 ## 0.7.0
 

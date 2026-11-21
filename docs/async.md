@@ -162,7 +162,7 @@ Linux x86-64, `-d:release`, one thread (`tools/asyncload.nim`):
   open on each connection the blocking server takes about 255 KiB per connection (100
   connections: 302 threads) and serves no more than about 256 calls at once: the
   handler limit `maxWorkers`, because a streaming handler holds a worker for as long as
-  the call lasts. Further calls wait; with 500 connections the client had not seen all its
+  the call lasts. Further calls wait (up to `Limits.maxQueuedCalls`, 1024, which is the limit added on 2026-11-21; past it a call is refused with REFUSED_STREAM, a client of this library sees UNAVAILABLE); the measurements here were made without it; with 500 connections the client had not seen all its
   calls open after 30 s. chronos held 2,000 connections with a call each in 80 MiB. So
   many idle clients cost the blocking server threads, and many open calls hit its worker
   limit; for either, use the chronos server. Not measured: TLS, requests per second, latency.

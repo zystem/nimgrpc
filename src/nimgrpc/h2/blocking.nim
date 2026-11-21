@@ -288,11 +288,26 @@ proc queueOutputLocked(c: ptr ConnObj) =
       if not progressed or c.outQBytes >= maxOutQueue: break
   c.wakeAll()     # senders may now be under their buffer limit
 
+proc removeQueuedLocked(c: ptr ConnObj; id: int32): int =
+  ## Takes the jobs of this connection out of the queue, those of stream `id`, or of every
+  ## stream when `id` < 0, and gives back their `pending`. Returns how many. Nobody runs a
+  ## handler for a call that is gone, and the queue does not hold what it left behind.
+  let s = c.server
+  if s == nil: return 0
+  acquire(s.jobLock)
+  for _ in 0 ..< s.jobs.len:
+    var j = s.jobs.popFirst()
+    if j.conn == c and (id < 0 or j.id == id): inc result
+    else: s.jobs.addLast move j
+  release(s.jobLock)
+  c.pending -= result
+
 proc failLocked(c: ptr ConnObj; why: string) =
   if not c.closed:
     c.closed = true
     if c.failure.len == 0: c.failure = why
     for st in c.streams.mvalues: st.closed = true
+    discard c.removeQueuedLocked(-1)       # its calls that no worker has taken: nobody will answer
     signal(c.wcond)
     c.wakeAll()
 
@@ -357,11 +372,22 @@ proc workerLoop(s: ptr ServerObj) {.thread.}
 
 proc dispatchLocked(c: ptr ConnObj; id: int32; headers: seq[Header]) =
   let s = c.server
+  acquire(s.jobLock)
+  # Calls that no worker can take now: the queue, less the idle workers and the threads still
+  # to be started. Past `maxQueuedCalls` of them the call is refused before it is queued.
+  let spare = s.idle + max(s.maxWorkers - s.workers.len, 0)
+  if s.limits.maxQueuedCalls > 0 and s.jobs.len - spare >= s.limits.maxQueuedCalls:
+    release(s.jobLock)
+    try:
+      c.sess.resetStream(id, REFUSED_STREAM)   # not started: the client may send it again
+      c.queueOutputLocked()
+    except CatchableError: discard
+    c.dropStreamLocked(id)
+    return
   c.streamPtr(id).handled = true
   c.streamPtr(id).holdMax = 0
   c.activityNs = nowNs()
   inc c.pending
-  acquire(s.jobLock)
   s.jobs.addLast Job(conn: c, id: id, headers: headers)
   if s.jobs.len > s.idle and s.workers.len < s.maxWorkers:
     let w = WorkerThread()
@@ -432,7 +458,10 @@ proc handleEventsLocked(c: ptr ConnObj) =
         let st = c.streamPtr(ev.streamId)
         st.closed = true
         st.errorCode = ev.errorCode
-        if isServer and not st.handled: c.dropStreamLocked(ev.streamId)
+        if isServer:
+          if not st.handled: c.dropStreamLocked(ev.streamId)
+          elif c.removeQueuedLocked(ev.streamId) > 0:   # still waiting for a worker
+            c.dropStreamLocked(ev.streamId)
     of evGoAway:
       c.goawayReceived = true
     of evPingAck:
