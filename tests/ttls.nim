@@ -1,6 +1,6 @@
 ## TLS and mutual TLS.
 
-import std/[unittest, os, osproc, strutils, net]
+import std/[unittest, os, osproc, strutils, net, streams]
 import nimgrpc
 import nimgrpc/tls/tls as rawtls
 import ./interop/interop
@@ -166,8 +166,14 @@ suite "TLS":
         let msg = expectFailure(proc () = ch.echoOnce())
         check "ALPN" in msg
         ch.close()
+        sleep(300)
       p.terminate()
       discard p.waitForExit()
+      # s_server prints what it receives: the client must have sent it nothing (before, it sent
+      # the HTTP/2 preface and SETTINGS, and only then found that ALPN had not been negotiated)
+      let received = p.outputStream.readAll()
+      check "PRI" notin received
+      check "HTTP/2" notin received
       p.close()
 
   test "bad PEM is reported when the config is built":
@@ -415,3 +421,46 @@ suite "a configuration shared between threads":
     for i in 0 ..< threads:
       check oks[i] == each
       for ch in chans[i]: ch.close()                  # on this thread, not on the one that dialled
+
+proc messageOf(f: proc () {.raises: [CatchableError].}): string =
+  ## The message of the TlsError `f` raises, "" if it does not.
+  try: f()
+  except TlsError as e: return e.msg
+  ""
+
+suite "the peer is verified before data moves":
+  test "a client that does not trust the server's CA: checkPeer raises, and keeps raising":
+    let a = connect(tlsClientConfig(pem"otherca.pem"),
+                    tlsServerConfig(pem"server.pem", pem"server.key"))
+    check not a.c.handshakeDone
+    check "certificate not signed by a trusted CA" in messageOf(proc () = a.c.checkPeer())
+    # a second ask used to pass: the flag was set before the checks were made
+    check "certificate not signed by a trusted CA" in messageOf(proc () = a.c.checkPeer())
+    check "certificate not signed by a trusted CA" in messageOf(proc () =
+      var got: seq[byte]
+      a.c.pullApp(got))
+
+  test "nothing is sent to a peer that failed":
+    let a = connect(tlsClientConfig(pem"otherca.pem"),
+                    tlsServerConfig(pem"server.pem", pem"server.key"))
+    check a.c.pushApp(@[1'u8, 2, 3]) == 0
+    a.c.flush()
+    check a.c.pushApp(@[1'u8, 2, 3]) == 0
+
+  test "a server that requires a certificate: a client without one fails the check on the server":
+    let a = connect(tlsClientConfig(pem"ca.pem"),
+                    tlsServerConfig(pem"server.pem", pem"server.key", clientCaPem = pem"ca.pem"))
+    check "the client presented no certificate" in messageOf(proc () = a.s.checkPeer())
+    check "the client presented no certificate" in messageOf(proc () = a.s.checkPeer())
+    check a.s.pushApp(@[1'u8]) == 0
+
+  test "a verified peer stays verified, and data moves without a call of checkPeer first":
+    let a = connect(tlsClientConfig(pem"ca.pem"),
+                    tlsServerConfig(pem"server.pem", pem"server.key"))
+    check a.c.pushApp(@[1'u8, 2, 3]) == 3         # settles the peer itself
+    a.c.flush()
+    a.s.feed(a.c.pullRecords())
+    var got: seq[byte]
+    a.s.pullApp(got)
+    check got == @[1'u8, 2, 3]
+    a.c.checkPeer(); a.c.checkPeer(); a.s.checkPeer()
