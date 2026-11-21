@@ -137,6 +137,10 @@ tests/interop/java_interop.sh      # needs a JDK and Maven; about 2 minutes
 
 The Nim peers take `--server-name=NAME` (the name the client checks in the certificate), `--no-per-message-compression` and, as a server, `--max-message=BYTES`.
 
+## Protobuf bounds against protobuf-go, 2026-11-21
+
+`tests/interop/gopb` feeds the same varints and tags (`cases.txt`) to protobuf-go v1.36.12 (`protowire.ConsumeVarint`, `ConsumeTag`) and to this library's decoder (`cmp.nim`). Run on 2026-11-21 (Go 1.24.2, Linux x86-64) on 20 inputs: before the change this decoder took a tenth varint byte above 1 and cut it to its lowest bit, so `ff ff ff ff ff ff ff ff ff 02` read as 9223372036854775807 and `80 80 80 80 80 80 80 80 80 02` as 0, where protobuf-go refuses them, and it took field numbers up to 2^61 - 1. After the change every varint agrees with protobuf-go. Two differences remain, on purpose: protobuf-go reads a tag with wire type 6 or 7 and leaves the type to its caller, and reads field numbers up to 2^31 - 1 (as unknown fields); this decoder refuses both as invalid tags (the limit of the format is 2^29 - 1). Not compared: the decoding of whole messages (the tests in `tests/tcodec.nim` cover the cases above), and other runtimes than protobuf-go.
+
 ## Health checking against grpc-go
 
 `tests/interop/health_interop.sh` builds grpc-go's own health client (`tests/interop/gohealth`,

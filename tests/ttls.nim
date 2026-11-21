@@ -422,6 +422,86 @@ suite "a configuration shared between threads":
       check oks[i] == each
       for ch in chans[i]: ch.close()                  # on this thread, not on the one that dialled
 
+proc verifies(cc, sc: TlsConfig): bool =
+  ## True if a handshake between the two completes and checks out on both ends (`checkPeer`
+  ## does nothing before the handshake is done, so a refused one must be told apart first).
+  try:
+    let a = connect(cc, sc)
+    if not (a.c.handshakeDone and a.s.handshakeDone): return false
+    a.c.checkPeer()
+    a.s.checkPeer()
+    result = true
+  except TlsError:
+    result = false
+
+proc raisesTlsError(f: proc () {.raises: [CatchableError].}): bool =
+  try: f()
+  except TlsError: return true
+  false
+
+suite "a TlsConfig is built, then in use":
+  test "a second setIdentity replaces the identity, it does not add to it":
+    let sc = newTlsConfig()
+    sc.setIdentity(pem"rogue.pem", pem"rogue.key")         # a CA the client does not trust
+    sc.setIdentity(pem"server.pem", pem"server.key")
+    check verifies(tlsClientConfig(pem"ca.pem"), sc)       # the chain starts with the new leaf
+
+  test "trust anchors added in several calls all count":
+    let cc = newTlsConfig()
+    cc.addTrustedCa(pem"ca.pem")
+    cc.addTrustedCa(pem"otherca.pem")
+    check verifies(cc, tlsServerConfig(pem"server.pem", pem"server.key"))
+    check verifies(cc, tlsServerConfig(pem"rogue.pem", pem"rogue.key"))
+
+  test "a setIdentity that fails leaves nothing behind":
+    let sc = newTlsConfig()
+    check raisesTlsError(proc () = sc.setIdentity(pem"server.pem", "not a key"))
+    # the chain was not kept: the configuration still has no identity
+    check raisesTlsError(proc () = discard newServerTls(sc))
+
+  test "a setIdentity that fails keeps the identity that was there":
+    let sc = tlsServerConfig(pem"server.pem", pem"server.key")
+    check raisesTlsError(proc () = sc.setIdentity(pem"rogue.pem", "not a key"))
+    check verifies(tlsClientConfig(pem"ca.pem"), sc)
+
+  test "an addTrustedCa with one bad certificate adds none":
+    let cc = newTlsConfig()
+    check raisesTlsError(proc () = cc.addTrustedCa(
+      pem"ca.pem" & "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"))
+    check raisesTlsError(proc () = discard newClientTls(cc, "localhost"))   # still no anchor
+
+  test "once a connection is made from it the setters refuse, and the connection goes on":
+    let sc = tlsServerConfig(pem"server.pem", pem"server.key")
+    let cc = tlsClientConfig(pem"ca.pem")
+    let a = connect(cc, sc)
+    check raisesTlsError(proc () = sc.addTrustedCa(pem"otherca.pem"))
+    check raisesTlsError(proc () = sc.setIdentity(pem"rsaserver.pem", pem"rsaserver.key"))
+    check raisesTlsError(proc () = sc.setCipherOrder(coChaChaFirst))
+    check raisesTlsError(proc () = sc.setSessionLifetime(0))
+    check raisesTlsError(proc () = sc.requireClientCert())
+    check raisesTlsError(proc () = cc.addTrustedCa(pem"otherca.pem"))
+    a.c.checkPeer(); a.s.checkPeer()                       # the connection is not harmed
+    check verifies(cc, sc)                                 # and the configuration is as it was
+
+  test "share ends the building too, for both objects":
+    let sc = tlsServerConfig(pem"server.pem", pem"server.key")
+    let other = sc.share
+    check raisesTlsError(proc () = sc.setSessionLifetime(0))
+    check raisesTlsError(proc () = other.setSessionLifetime(0))
+
+  test "a server and a dial take the configuration: it is in use from then on":
+    let sc = tlsServerConfig(pem"server.pem", pem"server.key")
+    let srv = newTestServer(tls = sc)
+    srv.start()
+    check raisesTlsError(proc () = sc.setSessionLifetime(0))
+    srv.stop()
+    let cc = tlsClientConfig(pem"ca.pem")
+    let srv2 = newTestServer(tls = tlsServerConfig(pem"server.pem", pem"server.key"))
+    srv2.start()
+    let ch = dial("127.0.0.1", srv2.port, cc, "localhost")
+    check raisesTlsError(proc () = cc.setSessionLifetime(0))
+    ch.close()
+    srv2.stop()
 proc messageOf(f: proc () {.raises: [CatchableError].}): string =
   ## The message of the TlsError `f` raises, "" if it does not.
   try: f()
