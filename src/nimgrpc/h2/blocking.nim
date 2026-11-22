@@ -53,6 +53,9 @@ type
     sock: Socket
     sess: H2Session
     peer: string          ## server: the address of the client, for `Limits.maxConnectionsPerIp`
+    peerCert: seq[byte]   ## server, mutual TLS: the DER of the client's certificate; set once,
+                          ## when the handshake is done and the peer verified, before any stream
+    peerSet: bool
     unread: int           ## body bytes in the `inbuf` of all streams
     connOwed: int         ## received bytes not yet given back to the connection window
     lock: Lock
@@ -193,6 +196,7 @@ proc `=destroy`(c: ConnObj) =
   `=destroy`(c.tls.addr[])
   `=destroy`(c.plainOut.addr[])
   `=destroy`(c.tlsIn.addr[])
+  `=destroy`(c.peerCert.addr[])
 
 proc `=copy`(dst: var ConnObj; src: ConnObj) {.error.}
 
@@ -549,6 +553,9 @@ proc pumpTlsInLocked(c: ptr ConnObj) =
     elif c.tlsIn.len == 0:
       break
   c.tls.checkPeer()
+  if c.server != nil and not c.peerSet and c.tls.handshakeDone:
+    c.peerCert = c.tls.peerCert()           # before the first byte of HTTP/2 is read
+    c.peerSet = true
   if app.len > 0: c.sess.recv(app)
   if c.tls.isClosed: raise newException(TlsError, c.tls.errorMessage)
 
@@ -949,6 +956,13 @@ proc recvData*(st: var ServerStream; buf: var seq[byte]): bool =
     result = c.recvLocked(st.id, buf, st.hasDeadline, st.deadline)
   finally:
     release(c.lock)
+
+proc peerCert*(st: ServerStream): seq[byte] =
+  ## The DER of the certificate the client authenticated with (mutual TLS); empty if it did not.
+  let c = st.conn
+  acquire(c.lock)
+  result = c.peerCert
+  release(c.lock)
 
 proc isClosed*(st: ServerStream): bool =
   ## True once the stream is gone (for example the client cancelled).

@@ -1,7 +1,7 @@
 # Nim compiler notes
 
-Two code generation problems in Nim (C backend, ORC, goto-based exceptions)
-affect this library. Both are worked around in the code. Both bear on code
+Three code generation problems in Nim (C backend, ORC, goto-based exceptions)
+affect this library. All three are worked around in the code. The first two bear on code
 that uses the library too.
 
 ## 1. An exception passing through `finally`/`defer` can be lost
@@ -62,3 +62,17 @@ pinned down.
 **Workaround.** The handler types carry no `raises` list, and handler calls
 are wrapped (`guarded` in `nimgrpc/typed`). The regression test is in
 tests/tgrpc.nim, "a typed streaming handler that raises".
+
+## 3. `return ""` after `result = newString(n)` leaks the string
+
+**Affected:** Nim 2.4.0 (ORC), run on 2026-11-22 under AddressSanitizer with
+`-d:useMalloc`. Not checked: the 2.2 series.
+
+A proc that makes `result = newString(n)` and later leaves with `return ""` loses the buffer it
+made: 100 calls leave "4900 byte(s) leaked in 100 allocation(s)". It is found where a proc
+builds a string and then refuses it half way (the reader of client certificates,
+`nimgrpc/tls/peerid`, did this for a name with a control character, and only the hostile
+inputs of its tests showed it). Reproduction: `tests/nimbug_return_leak.nim`.
+
+**Workaround.** Check the input first and make the string only when it is wanted, so that a
+refusal allocates nothing (`peerid.asciiText`). The mechanism is not pinned down.

@@ -59,6 +59,8 @@ type
     transp: StreamTransport
     sess: H2Session
     peer: string               ## server: the address of the client, for `Limits.maxConnectionsPerIp`
+    peerCert: seq[byte]        ## server, mutual TLS: the DER of the client's certificate
+    peerSet: bool
     tls: TlsConn
     tlsIn: seq[byte]
     tlsInPos: int
@@ -290,6 +292,9 @@ proc pumpTlsIn(c: AsyncH2Conn) =
     elif c.tlsIn.len == 0:
       break
   c.tls.checkPeer()
+  if c.server != nil and not c.peerSet and c.tls.handshakeDone:
+    c.peerCert = c.tls.peerCert()           # before the first byte of HTTP/2 is read
+    c.peerSet = true
   if app.len > 0: c.sess.recv(app)
   if c.tls.isClosed: raise newException(TlsError, c.tls.errorMessage)
 
@@ -557,6 +562,10 @@ proc setTimeout*(st: AsyncH2Stream; ms: int; answer = false) =
   ## can still end with a status (`sendHeaders`, `sendTrailers`).
   st.answerDeadline = answer
   st.armDeadline(ms)
+
+proc peerCert*(st: AsyncH2Stream): seq[byte] =
+  ## The DER of the certificate the client authenticated with (mutual TLS); empty if it did not.
+  st.conn.peerCert
 
 proc isClosed*(st: AsyncH2Stream): bool =
   ## True once the stream is gone (cancelled, reset, timed out, connection closed).
