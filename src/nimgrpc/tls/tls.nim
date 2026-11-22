@@ -85,6 +85,7 @@ proc `=copy`(dst: var TlsConfigObj; src: TlsConfigObj) {.error.}
 
 proc `=destroy`(t: TlsConnObj) =
   if not t.raw.isNil: gtls_free(t.raw)
+  `=destroy`(t.why.addr[])   # a type with its own `=destroy` must free its own fields
 proc `=copy`(dst: var TlsConnObj; src: TlsConnObj) {.error.}
 
 proc bytesOf(s: string): ptr byte =
