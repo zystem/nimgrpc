@@ -22,6 +22,31 @@ var token = "s3cret"                     # must stay valid while the server runs
 srv.addInterceptor(checkToken, token.addr)   # before srv.start()
 ```
 
+To decide by who the client is, read `ctx.peer`: on a server with mutual TLS (`tlsServerConfig(...,
+clientCaPem = ...)`) it holds what the client's certificate says, and without mutual TLS
+`ctx.peer.authenticated` is false and the rest is empty. The identity is read from the certificate alone
+(never from `ctx.metadata`, which the client writes), and it is the same on a resumed TLS session.
+Names are text from the certificate: compare them exactly, and prefer `uris` (a SPIFFE ID) or `fingerprint`
+for a decision.
+
+```nim
+const allowed = "spiffe://example.org/ns/prod/sa/billing"
+
+proc onlyBilling(ctx: var ServerContext; next: ServerNext; userData: pointer)
+    {.nimcall, gcsafe, raises: [CatchableError].} =
+  if not ctx.peer.authenticated:
+    raise newGrpcError(scUnauthenticated, "a client certificate is needed")
+  if allowed notin ctx.peer.uris:
+    raise newGrpcError(scPermissionDenied, "this client may not call here")
+  next.proceed(ctx)
+
+srv.addInterceptor(onlyBilling)
+```
+
+On the chronos server `ctx.peer` is a field of `AsyncServerContext` in the same way. `ctx.peer.certDer` is the
+client's own certificate (DER) for code that needs more than the names above. A client certificate larger than
+128 KiB is refused in the handshake, so a handler never sees an authenticated client without an identity.
+
 To do something after the call (log it, time it), catch what `proceed` raises into a variable and raise it again after the `except` block. Do not use `finally` or `defer`: Nim 2.2.12 and 2.2.14 can lose an exception that passes through them ([nim-compiler-notes.md](nim-compiler-notes.md)).
 
 ```nim

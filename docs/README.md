@@ -26,7 +26,7 @@ a **how-to** does one task, a **reference** is complete and dry, an **explanatio
 | [architecture.md](architecture.md) | explanation | the parts, who acts and what each action does |
 | [threat-model.md](threat-model.md) | explanation | who can attack what, and what stands in the way |
 | [assurance-case.md](assurance-case.md) | explanation | why the security requirements are met |
-| [nim-compiler-notes.md](nim-compiler-notes.md) | explanation | two compiler problems and how to write code around them |
+| [nim-compiler-notes.md](nim-compiler-notes.md) | explanation | three compiler problems and how to write code around them |
 | [nim-issue-finally.md](nim-issue-finally.md) | reference | the text of the compiler issue behind the notes above |
 
 `tests/tdocs.nim` fails when a page of this directory is not in the table, when a message of the

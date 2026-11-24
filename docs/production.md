@@ -90,6 +90,10 @@ Set by default, check that they suit you:
       worker (set it to about half of `maxWorkers`; the rest get RESOURCE_EXHAUSTED at once), and
       `Limits.maxStreamingCallMs` (0: `maxCallMs` applies) gives streaming calls their own
       time limit, longer or shorter than the one of the other calls, or none (-1).
+- [ ] Authorisation by who the client is: with mutual TLS, `ctx.peer` (in a handler or an interceptor) has the
+      names in the client's certificate; decide by `uris` (a SPIFFE ID), `fingerprint` or `dnsNames`, compare
+      them exactly, and trust the CA of `clientCaPem` for those names only. Without mutual TLS `ctx.peer.authenticated`
+      is false. See [interceptors.md](interceptors.md).
 - [ ] `newHealth(maxWatches = 64)`, `newReflection(maxStreams = 16)` on the blocking server.
 - [ ] `pingPolicy`: off by default; set `minIntervalMs` to refuse clients that ping too often.
 - [ ] No rate limit of calls exists. Put one in front or in the handlers if you need it.
