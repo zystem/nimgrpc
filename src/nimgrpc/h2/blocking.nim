@@ -132,6 +132,9 @@ type
     stopping: Atomic[bool]
     acceptor: Thread[ptr ServerObj]
     retained: Atomic[int]   ## bytes held for calls that have no worker (see `Limits.maxQueuedBytes`)
+    refusedQueue: Atomic[int]    ## calls refused because `Limits.maxQueuedCalls` were waiting
+    refusedBytes: Atomic[int]    ## calls refused at their first headers: `Limits.maxQueuedBytes`
+    shedBytes: Atomic[int]       ## waiting calls reset because their data or trailers went past it
     jobLock: Lock
     jobCond: Cond
     jobs: Deque[Job]
@@ -310,10 +313,27 @@ proc headerBytes(headers: openArray[Header]): int =
   ## What a block of headers weighs, as HTTP/2 counts it: names and values, and 32 for each.
   for (k, v) in headers: result += k.len + v.len + 32
 
-proc retainedAdd(c: ptr ConnObj; st: var StreamState; n: int) =
-  ## `n` more bytes are held for a stream that has no worker yet.
+proc reserveBudget*(retained: var Atomic[int]; limit, n: int): bool =
+  ## Takes `n` bytes of a budget of `limit` bytes (0: no limit, the bytes are only counted) held in
+  ## `retained`, or says there is no room. Checking the figure and adding to it is one atomic
+  ## step: readers of different connections run under different locks and would otherwise all
+  ## see room for the same bytes, and the total would pass the limit.
+  if n <= 0: return true
+  var cur = retained.load
+  while true:
+    if limit > 0 and cur + n > limit: return false
+    if retained.compareExchangeWeak(cur, cur + n): return true
+
+proc reserveBytes(s: ptr ServerObj; n: int): bool =
+  ## `reserveBudget` for the bytes held for calls that have no worker (`Limits.maxQueuedBytes`).
+  s.retained.reserveBudget(s.limits.maxQueuedBytes, n)
+
+proc chargeLocked(c: ptr ConnObj; st: var StreamState; n: int): bool =
+  ## `n` more bytes are held for a stream that has no worker yet; false (and nothing held) if the
+  ## budget of the server has no room for them.
+  if not c.server.reserveBytes(n): return false
   st.retained += n
-  discard c.server.retained.fetchAdd(n)
+  true
 
 proc retainedFree(c: ptr ConnObj; st: var StreamState) =
   ## The stream has a worker, or is gone: what it held is no longer counted.
@@ -400,6 +420,7 @@ proc dispatchLocked(c: ptr ConnObj; id: int32; headers: seq[Header]) =
   let spare = s.idle + max(s.maxWorkers - s.workers.len, 0)
   if s.limits.maxQueuedCalls > 0 and s.jobs.len - spare >= s.limits.maxQueuedCalls:
     release(s.jobLock)
+    discard s.refusedQueue.fetchAdd(1)
     try:
       c.sess.resetStream(id, REFUSED_STREAM)   # not started: the client may send it again
       c.queueOutputLocked()
@@ -449,6 +470,7 @@ proc shedLocked(c: ptr ConnObj; id: int32): bool =
   let st = c.streamPtr(id)
   if st == nil or st.started: return false
   if st.handled and c.removeQueuedLocked(id) == 0: return false    # taken a moment ago
+  discard c.server.shedBytes.fetchAdd(1)
   try:
     c.sess.resetStream(id, REFUSED_STREAM)
     c.queueOutputLocked()
@@ -464,15 +486,23 @@ proc handleEventsLocked(c: ptr ConnObj) =
     case ev.kind
     of evHeaders:
       if known:
-        let st = c.streamPtr(ev.streamId)
-        st.blocks.add ev.headers
-        if ev.headersEndStream: st.inEnded = true
-        if st.holdMax > 0 and not st.handled: c.heldLocked(ev.streamId, 0)
+        # Another block of headers on a call (its trailers): it is kept as well, so it is charged
+        # as the first block was; over the budget the call is reset, as when its data does.
+        let st0 = c.streamPtr(ev.streamId)
+        var shed = false
+        if isServer and not st0.started and not c.chargeLocked(st0[], headerBytes(ev.headers)):
+          shed = c.shedLocked(ev.streamId)
+        if not shed:
+          let st = c.streamPtr(ev.streamId)
+          st.blocks.add ev.headers
+          if ev.headersEndStream: st.inEnded = true
+          if st.holdMax > 0 and not st.handled: c.heldLocked(ev.streamId, 0)
       elif isServer and ev.streamId > c.lastDispatched:
         let s = c.server
         c.lastDispatched = ev.streamId
         let hb = headerBytes(ev.headers)
-        if s.limits.maxQueuedBytes > 0 and s.retained.load + hb > s.limits.maxQueuedBytes:
+        if not s.reserveBytes(hb):
+          discard s.refusedBytes.fetchAdd(1)
           try:     # over the budget of bytes held for calls without a worker: not started
             c.sess.resetStream(ev.streamId, REFUSED_STREAM)
             c.queueOutputLocked()
@@ -482,27 +512,27 @@ proc handleEventsLocked(c: ptr ConnObj) =
           if s.whole != nil and not ev.headersEndStream:
             hold = max(0, s.whole(ev.headers, s.userData))
           c.streams[ev.streamId] = StreamState(blocks: @[ev.headers],
-                                               inEnded: ev.headersEndStream, holdMax: hold)
-          c.retainedAdd(c.streamPtr(ev.streamId)[], hb)
+                                               inEnded: ev.headersEndStream, holdMax: hold,
+                                               retained: hb)    # reserved above
           if hold == 0: c.dispatchLocked(ev.streamId, ev.headers)
     of evData:
-      if known and isServer and not c.streamPtr(ev.streamId).started and
-         c.server.limits.maxQueuedBytes > 0 and
-         c.server.retained.load + ev.data.len > c.server.limits.maxQueuedBytes and
-         c.shedLocked(ev.streamId):
-        c.receivedLocked(ev.data.len, kept = false)       # the call is gone: nobody will read it
-      elif known:
+      var shed = false        # the call went over the budget: it is reset and forgotten
+      var reserved = false    # the budget has room for these bytes, and they are taken
+      if known and isServer and not c.streamPtr(ev.streamId).started:
+        reserved = c.server.reserveBytes(ev.data.len)
+        if not reserved: shed = c.shedLocked(ev.streamId)
+      if not known or shed:
+        c.receivedLocked(ev.data.len, kept = false)       # nobody will read it
+      else:
         let st = c.streamPtr(ev.streamId)
         let n = ev.data.len
         if st.inbuf.len == 0: st.inbuf = move ev.data     # no copy
         else: st.inbuf.appendBytes ev.data
         if ev.dataEndStream: st.inEnded = true
-        if isServer and not st.started: c.retainedAdd(st[], n)
+        if reserved: st.retained += n
         c.receivedLocked(n, kept = true)
         if st.holdMax > 0 and not st.handled: c.heldLocked(ev.streamId, n)
         if c.connOwed > 0: c.releaseHeldLocked()
-      else:
-        c.receivedLocked(ev.data.len, kept = false)       # nobody will read it
     of evStreamClosed:
       if known:
         let st = c.streamPtr(ev.streamId)
@@ -1098,6 +1128,25 @@ proc workerLoop(s: ptr ServerObj) {.thread.} =
       c.finishHandlerLocked(job.id)
       release(c.lock)
 
+type ServerStats* = object
+  ## What the limits of the blocking server hold and have refused, for monitoring (a counter only
+  ## grows; a gauge goes up and down).
+  queuedCalls*: int      ## gauge: calls waiting for a worker
+  queuedBytes*: int      ## gauge: bytes held for the calls that have no worker (`maxQueuedBytes`)
+  refusedQueue*: int     ## counter: calls refused, `maxQueuedCalls` were waiting
+  refusedBytes*: int     ## counter: calls refused at their first headers, `maxQueuedBytes` was held
+  shedBytes*: int        ## counter: waiting calls reset, their data or trailers went past it
+
+proc stats*(s: Server): ServerStats =
+  ## Reading it takes a lock for a moment; call it when it is wanted, not for every call.
+  acquire(s.jobLock)
+  result.queuedCalls = s.jobs.len
+  release(s.jobLock)
+  result.queuedBytes = s.retained.load
+  result.refusedQueue = s.refusedQueue.load
+  result.refusedBytes = s.refusedBytes.load
+  result.shedBytes = s.shedBytes.load
+
 proc queueStats*(s: Server): tuple[calls, bytes: int] =
   ## Calls that are waiting for a worker, and the bytes held for all the calls that have none (the
   ## request headers and body that have arrived, of calls that wait for a worker or for the rest of
@@ -1495,6 +1544,21 @@ proc send*(st: var ClientStream; data: openArray[byte]; endStream = false;
 proc closeSend*(st: var ClientStream) =
   ## Ends the request body (half-close).
   st.send([], endStream = true)
+
+proc sendTrailers*(st: var ClientStream; trailers: openArray[Header]) =
+  ## Ends the request with a trailing HEADERS block (HTTP/2 allows it; gRPC clients do not send
+  ## one). Nothing may be sent on the stream after it.
+  let c = st.conn
+  acquire(c.lock)
+  try:
+    let s = c.streamPtr(st.id)
+    if s == nil or s.closed or c.closed: raise c.closedError(s, st.id)
+    if s.outEnded: raise newException(H2Error, "stream " & $st.id & ": request already ended")
+    c.sess.sendTrailers(st.id, trailers)
+    s.outEnded = true
+    c.queueOutputLocked()
+  finally:
+    release(c.lock)
 
 proc recvHeaders*(st: var ClientStream): seq[Header] =
   ## Blocks for the response HEADERS.

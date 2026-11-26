@@ -12,13 +12,14 @@ import nimgrpc/tls/tls as rawtls
 
 when defined(linux) and not defined(useMalloc):
   {.passc: "-O2".}
-  {.passl: "-Wl,--wrap=free".}
+  {.passl: "-Wl,--wrap=free -Wl,--wrap=realloc".}
   {.emit: """
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
 extern void __real_free(void *);
+extern void *__real_realloc(void *, size_t);
 static const unsigned char *wipe_needle[4];
 static size_t wipe_len[4];
 static int wipe_n;
@@ -31,6 +32,20 @@ void __wrap_free(void *p) {
             if (sz >= wipe_len[i] && memmem(p, sz, wipe_needle[i], wipe_len[i])) wipe_hits[i]++;
     }
     __real_free(p);
+}
+/* While armed, a `realloc` always moves the block, and the old block is searched for the needles
+ * before it is given back: what `realloc` does when it moves a buffer, which an ordinary run
+ * rarely shows. */
+void *__wrap_realloc(void *p, size_t n) {
+    if (!wipe_armed || !p || n == 0) return __real_realloc(p, n);
+    size_t old = malloc_usable_size(p);
+    void *q = malloc(n);
+    if (!q) return NULL;
+    memcpy(q, p, old < n ? old : n);
+    for (int i = 0; i < wipe_n; i++)
+        if (old >= wipe_len[i] && memmem(p, old, wipe_needle[i], wipe_len[i])) wipe_hits[i]++;
+    __real_free(p);
+    return q;
 }
 void wipe_set(int i, const unsigned char *n, size_t l) { wipe_needle[i] = n; wipe_len[i] = l; if (i >= wipe_n) wipe_n = i + 1; wipe_hits[i] = 0; }
 void wipe_arm(int on) { wipe_armed = on; }
@@ -100,6 +115,26 @@ int wipe_hit(int i) { return wipe_hits[i]; }
       checkpoint "plaintext found in freed blocks: " & $wipeHit(1)
       check wipeHit(0) == 0
       check wipeHit(1) == 0
+
+    test "a PEM key that makes the decoder's buffer grow leaves no copy where the buffer was":
+      # An RSA-4096 key is a PEM of about 3 KiB and 2.4 KiB of DER: the buffer (1 KiB to begin
+      # with) grows twice. `realloc` may move it and give the old block back unwiped; the
+      # wrapper makes it always move, and looks in the old block for a piece of the private
+      # exponent, which lies in the first KiB. The chain is not the key's: nothing is checked
+      # against it here.
+      var body = ""
+      for l in pem"rsa4096.key".splitLines:
+        if l.len > 0 and not l.startsWith("-----"): body.add l
+      let der = base64.decode(body)
+      doAssert der.len > 2048
+      let piece = der[700 ..< 764]                  # inside the private exponent, in the first KiB
+      wipeSet(2, cast[ptr byte](piece[0].unsafeAddr), csize_t(piece.len))
+      wipeArm(1)
+      let c = newTlsConfig()
+      c.setIdentity(pem"rsaserver.pem", pem"rsa4096.key")
+      wipeArm(0)
+      checkpoint "private exponent found in the old buffers: " & $wipeHit(2)
+      check wipeHit(2) == 0
 else:
   suite "memory that the TLS layer frees":
     test "skipped (needs Linux and no -d:useMalloc)":

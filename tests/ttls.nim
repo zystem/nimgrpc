@@ -544,3 +544,32 @@ suite "the peer is verified before data moves":
     a.s.pullApp(got)
     check got == @[1'u8, 2, 3]
     a.c.checkPeer(); a.c.checkPeer(); a.s.checkPeer()
+
+suite "after a change of policy":
+  test "a client that was let in is refused by the server with another set of trusted CAs":
+    # Whoever resumed a session under the old policy has to show its certificate again under the
+    # new one: a session lives in the cache of one config, and a new config (new trust anchors)
+    # has none. The test is the denial after the change, and that the first session did not help.
+    let before = tlsServerConfig(pem"server.pem", pem"server.key", clientCaPem = pem"ca.pem")
+    let cc = tlsClientConfig(pem"ca.pem", pem"client.pem", pem"client.key")
+    let first = connect(cc, before)
+    first.c.checkPeer(); first.s.checkPeer()
+    let again = connect(cc, before)
+    again.c.checkPeer(); again.s.checkPeer()
+    check again.s.resumed                        # under the old policy the session is resumed ...
+    let after = tlsServerConfig(pem"server.pem", pem"server.key", clientCaPem = pem"otherca.pem")
+    let refusedNow = connect(cc, after)          # ... and under the new one the client is not let in
+    check not (refusedNow.s.handshakeDone and
+               (try: (refusedNow.s.checkPeer(); true) except TlsError: false))
+    check not refusedNow.s.resumed
+
+  test "a server that needs no resumption does not keep a session: lifetime 0":
+    let sc = tlsServerConfig(pem"server.pem", pem"server.key", clientCaPem = pem"ca.pem")
+    sc.setSessionLifetime(0)
+    let cc = tlsClientConfig(pem"ca.pem", pem"client.pem", pem"client.key")
+    cc.setSessionLifetime(0)
+    let a = connect(cc, sc)
+    a.c.checkPeer(); a.s.checkPeer()
+    let b = connect(cc, sc)
+    b.c.checkPeer(); b.s.checkPeer()
+    check not b.s.resumed                        # every connection shows its certificate

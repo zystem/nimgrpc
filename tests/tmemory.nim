@@ -99,6 +99,22 @@ suite "allocation failures in the TLS layer":
       if raised: inc failures
     check failures > 0
 
+  test "setIdentity with an RSA-4096 key (a buffer that grows twice): a failure changes nothing":
+    var failures = 0
+    for k in 0 ..< maxAllocs:
+      let sc = tlsServerConfig(pem"server.pem", pem"server.key")   # trusted by the client
+      failAfter = clong(k)
+      let (raised, pending) = injected(proc (): bool =
+        try: sc.setIdentity(pem"rsaserver.pem", pem"rsa4096.key")
+        except TlsError: return true
+        false)
+      if pending: break
+      # failed: still the trusted identity; done: a chain with a key that is not its own, which
+      # no client accepts
+      check raised == verifies(tlsClientConfig(pem"ca.pem"), sc)
+      if raised: inc failures
+    check failures > 0
+
   test "a connection that cannot be made says so, and the next one can":
     var failures = 0
     for k in 0 ..< maxAllocs:
@@ -116,14 +132,41 @@ suite "allocation failures in the TLS layer":
       if raised: inc failures
     check failures > 0
 
-  test "the configuration builders: a failure raises, and nothing is half built":
+  test "the configuration builders: every failed allocation is a TlsError":
+    # Nothing a builder allocates is optional: it makes the trust anchors, the chain, the key and
+    # the configuration itself, and a configuration that lacked any of them would trust or
+    # present something other than what was asked. So each failure of the numbers below must come
+    # out as a TlsError (an allocation that was allowed to fail quietly would show here as a
+    # config that came back), and the first number that does not fail ends the loop.
     for k in 0 ..< maxAllocs:
       failAfter = clong(k)
+      var built: TlsConfig
       let (raised, pending) = injected(proc (): bool =
-        try: discard tlsServerConfig(pem"server.pem", pem"server.key", clientCaPem = pem"ca.pem")
+        try:
+          built = tlsServerConfig(pem"server.pem", pem"server.key", clientCaPem = pem"ca.pem")
         except TlsError: return true
         false)
-      if pending: break
-      discard raised
-    # a build that did not fail works as always
+      if pending:
+        check not raised and built != nil        # fewer allocations than k: a whole config
+        break
+      check raised                                # one that failed: no config, and an error
+      check built == nil
+    for k in 0 ..< maxAllocs:                     # the client builder with its identity, too
+      failAfter = clong(k)
+      var built: TlsConfig
+      let (raised, pending) = injected(proc (): bool =
+        try:
+          built = tlsClientConfig(pem"ca.pem", pem"client.pem", pem"client.key")
+        except TlsError: return true
+        false)
+      if pending:
+        check not raised and built != nil
+        break
+      check raised
+      check built == nil
+    # a build that did not fail has the trust and the identity that were asked for
     check verifies(tlsClientConfig(pem"ca.pem"), tlsServerConfig(pem"server.pem", pem"server.key"))
+    check verifies(tlsClientConfig(pem"ca.pem", pem"client.pem", pem"client.key"),
+                   tlsServerConfig(pem"server.pem", pem"server.key", clientCaPem = pem"ca.pem"))
+    check not verifies(tlsClientConfig(pem"otherca.pem"),
+                       tlsServerConfig(pem"server.pem", pem"server.key"))
