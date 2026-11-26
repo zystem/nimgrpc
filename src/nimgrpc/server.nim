@@ -111,6 +111,7 @@ type
     maxStreamingCalls: int   ## `Limits.maxStreamingCalls`
     maxStreamingCallMs: int  ## `Limits.maxStreamingCallMs`
     streaming: Atomic[int]   ## streaming handlers that are running
+    refusedStreaming: Atomic[int]   ## streaming calls answered RESOURCE_EXHAUSTED: over the quota
     errorHook: ErrorHook     ## read by workers without a lock: set before `start`
     interceptors: seq[Intercept]   ## the same; the first added is the outermost
 
@@ -351,6 +352,7 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
     # answered at once, and the workers they would have held stay for the unary calls.
     if reg.streaming.fetchAdd(1) >= reg.maxStreamingCalls:
       discard reg.streaming.fetchSub(1)
+      discard reg.refusedStreaming.fetchAdd(1)
       call.finishCall(scResourceExhausted, "too many streaming calls", @[])
       return
     counted = true
@@ -477,6 +479,25 @@ proc servicesIn*(handle: pointer): seq[string] {.gcsafe.} =
   serviceNamesOf(cast[ptr Registry](handle))
 
 proc port*(s: GrpcServer): int = s.h2.port.int
+
+type GrpcServerStats* = object
+  ## What the limits hold and have refused, for monitoring: gauges go up and down, counters only grow.
+  queuedCalls*: int       ## gauge, blocking server: calls waiting for a worker
+  queuedBytes*: int       ## gauge, blocking server: bytes held for calls that have no worker
+  refusedQueue*: int      ## counter, blocking server: refused, `maxQueuedCalls` were waiting
+  refusedBytes*: int      ## counter, blocking server: refused at their headers, `maxQueuedBytes` held
+  shedBytes*: int         ## counter, blocking server: waiting calls reset over `maxQueuedBytes`
+  refusedStreaming*: int  ## counter: streaming calls answered RESOURCE_EXHAUSTED (`maxStreamingCalls`)
+  runningStreaming*: int  ## gauge: streaming handlers that are running (counted with `maxStreamingCalls`)
+
+proc stats*(s: GrpcServer): GrpcServerStats =
+  ## The figures to put on a dashboard or an alert. A refusal rate that is not zero for long says a
+  ## limit is too low, or that clients come in faster than the server can take them.
+  let h = s.h2.stats()
+  GrpcServerStats(queuedCalls: h.queuedCalls, queuedBytes: h.queuedBytes,
+                  refusedQueue: h.refusedQueue, refusedBytes: h.refusedBytes,
+                  shedBytes: h.shedBytes, refusedStreaming: s.reg.refusedStreaming.load,
+                  runningStreaming: s.reg.streaming.load)
 
 proc queueStats*(s: GrpcServer): tuple[calls, bytes: int] =
   ## Calls waiting for a worker, and the bytes held for the calls that have none (see

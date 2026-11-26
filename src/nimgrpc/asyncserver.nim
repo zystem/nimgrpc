@@ -92,6 +92,7 @@ type
     policy: PingPolicy
     limits: Limits
     streamingActive: int     ## streaming handlers that are running (`Limits.maxStreamingCalls`)
+    refusedStreaming: int    ## streaming calls answered RESOURCE_EXHAUSTED: over the quota
     errorHook: ErrorHook
     interceptors: seq[AsyncServerInterceptor]   ## the first added is the outermost
     h2: AsyncH2Server
@@ -325,6 +326,7 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
   var counted = false
   if m.kind == mkStreaming and s.limits.maxStreamingCalls > 0:
     if s.streamingActive >= s.limits.maxStreamingCalls:
+      inc s.refusedStreaming
       call.finishCall(scResourceExhausted, "too many streaming calls", @[])
       return
     inc s.streamingActive
@@ -382,6 +384,15 @@ proc setErrorHook*(s: AsyncGrpcServer; hook: ErrorHook) =
   ## Without a hook nothing is logged. Set it before `start`.
   doAssert s.h2 == nil, "the error hook must be set before start"
   s.errorHook = hook
+
+type AsyncServerStats* = object
+  ## What the quota of streaming calls holds and has refused, for monitoring (the chronos server has
+  ## no queue of calls: the other figures of the blocking server do not exist here).
+  refusedStreaming*: int  ## counter: streaming calls answered RESOURCE_EXHAUSTED (`maxStreamingCalls`)
+  runningStreaming*: int  ## gauge: streaming handlers that are running
+
+proc stats*(s: AsyncGrpcServer): AsyncServerStats =
+  AsyncServerStats(refusedStreaming: s.refusedStreaming, runningStreaming: s.streamingActive)
 
 proc addInterceptor*(s: AsyncGrpcServer; interceptor: AsyncServerInterceptor) =
   ## `interceptor` runs around every call to a registered method; a call to an unknown method

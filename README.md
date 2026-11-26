@@ -194,6 +194,9 @@ the exception; without a hook nothing is printed).
 TLS and mutual TLS (BearSSL, TLS 1.2, ALPN `h2`; RSA or EC keys in PEM):
 
 ```nim
+# A TlsConfig is built on one thread, and is finished before its first use (a connection, `share`,
+# a server or a channel): after that its setters raise TlsError. The PEM strings stay in your
+# memory; overwrite the key once the config is built.
 let srv = newGrpcServer(port = 50051,
   tls = tlsServerConfig(readFile("server.pem"), readFile("server.key"),
                         clientCaPem = readFile("ca.pem")))   # omit for plain TLS

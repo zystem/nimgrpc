@@ -50,6 +50,8 @@ suite "maxStreamingCalls (blocking server)":
     let (code, ms) = recvCode(ch, timeoutMs = 5000)
     check code == scResourceExhausted
     check ms < 1000                               # at once, not at the deadline
+    check srv.stats().refusedStreaming == 1
+    check srv.stats().runningStreaming == 2
     # the third did not take a worker: unary calls are served as before
     for i in 0 ..< 10:
       check bc.unaryCall(ch, "/t.T/Echo", @[1'u8], timeoutMs = 3000).message == @[1'u8]
@@ -153,6 +155,7 @@ suite "the same limits on the chronos server":
     let (code, ms) = waitFor scenario(srv.port)
     check code == scResourceExhausted
     check ms < 1000
+    check srv.stats().refusedStreaming == 1
 
   test "maxStreamingCallMs replaces maxCallMs, and -1 lifts it":
     let shorter = newAsyncGrpcServer(limits = Limits(maxStreamingCallMs: 250))

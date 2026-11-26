@@ -102,6 +102,11 @@ type
     coChaChaFirst
 
 proc newTlsConfig*(): TlsConfig =
+  ## An empty configuration, to be filled by ONE thread with the setters below and then used. The
+  ## freeze that ends the building is a checked flag, not a lock: a setter that runs while another
+  ## thread makes a connection from the same config, or shares it, is a data race. Finish it
+  ## before it is given to anybody. The PEM strings you pass stay in your memory (the library
+  ## wipes the copies it makes, not yours): overwrite the key when the config is built.
   result = TlsConfig(raw: gtls_conf_new())
   if result.raw.isNil: raise newException(TlsError, "out of memory")
 
@@ -149,7 +154,8 @@ proc share*(c: TlsConfig): TlsConfig =
   ## count of `c`, which another thread may be changing. The configuration is
   ## freed when the last object made from it and the last connection using it
   ## are gone. `c` is only read, so any number of threads may call `share` on it
-  ## at once as long as none of them copies the reference.
+  ## at once as long as none of them copies the reference. `share` ends the building of `c`: the
+  ## setters raise from then on, and they must not run on another thread at the same moment.
   if c.isNil: return nil
   gtls_conf_retain(c.raw)
   TlsConfig(raw: c.raw)
@@ -174,7 +180,8 @@ proc requireClientCert*(c: TlsConfig; on = true) =
 
 proc tlsClientConfig*(caPem: string; certChainPem = ""; privateKeyPem = "";
                       cipherOrder = coAuto): TlsConfig =
-  ## A client trusting `caPem`; with a chain and key it also authenticates itself.
+  ## A client trusting `caPem`; with a chain and key it also authenticates itself. The config comes
+  ## back finished (build further on one thread only, before its first use: see `newTlsConfig`).
   result = newTlsConfig()
   result.setCipherOrder(cipherOrder)
   result.addTrustedCa(caPem)
@@ -182,7 +189,8 @@ proc tlsClientConfig*(caPem: string; certChainPem = ""; privateKeyPem = "";
 
 proc tlsServerConfig*(certChainPem, privateKeyPem: string; clientCaPem = "";
                       cipherOrder = coAuto): TlsConfig =
-  ## A server; with `clientCaPem` clients must present a certificate it signed.
+  ## A server; with `clientCaPem` clients must present a certificate it signed. The config comes
+  ## back finished (build further on one thread only, before its first use: see `newTlsConfig`).
   result = newTlsConfig()
   result.setCipherOrder(cipherOrder)
   result.setIdentity(certChainPem, privateKeyPem)

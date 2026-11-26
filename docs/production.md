@@ -31,21 +31,37 @@ measured in a large deployment ([security-requirements.md](security-requirements
       repository and out of the image; keep a backup of the CA key where the server is not.
 - [ ] RSA keys of 2048 bits or more, or EC; SHA-256 signatures or better. Others fail the
       handshake.
+- [ ] Build a `TlsConfig` on one thread and finish every setter (`addTrustedCa`, `setIdentity`,
+      `setCipherOrder`, `setSessionLifetime`, `requireClientCert`) before its first use: a connection,
+      `share`, a server or a channel. After that it cannot change and the setters raise `TlsError`.
+      The freeze is a checked flag, not a lock: a setter that runs on one thread while another thread
+      makes a connection from the same config, or shares it, is a data race. Hand the finished config
+      out and do not touch it again.
+- [ ] The PEM text you pass (the private key included) stays in your memory. The library wipes the
+      copies it makes (the decoder's buffer, which is never grown with `realloc`, and the key it keeps),
+      but it cannot wipe your string: read the key into a variable, build the config, then overwrite the
+      variable (`zeroMem`), and keep keys out of logs, environment dumps and core files
+      (`ulimit -c 0`).
+- [ ] A client that must be refused within a known time (a revoked certificate): a resumed session
+      skips the certificate check, so set `setSessionLifetime` to no more than that time, or to 0 for no
+      resumption. Serve tenants that must not trust one another's clients from different servers or
+      configs: a session never crosses configs, and every config has its own trust anchors.
 - [ ] Renewal: there is no reload. A new certificate needs a new server, so plan a restart
       (`stop(graceMs)`) before the old one ends, and watch the end date from outside.
 - [ ] Revocation is not checked (no CRL, no OCSP). To cut a client off, change the CA or
-      refuse it in the handler by metadata. **Session resumption** keeps a peer that holds a
+      refuse it by name (`ctx.peer`, its fingerprint say) in an interceptor. **Session resumption** keeps a peer that holds a
       session for ten minutes without a new certificate check: `setSessionLifetime(0)` turns
       it off.
-- [ ] Mutual TLS (`clientCaPem`) admits a client whose certificate the CA signed. The handler
-      is not told which client it is: authorization needs metadata as well.
+- [ ] Mutual TLS (`clientCaPem`) admits a client whose certificate the CA signed. Which client it
+      is, the handler and the interceptor read from `ctx.peer`: authorization is still the
+      program's job.
 
 ## Who may call what
 
 - [ ] The library has no authentication or authorization of calls. Check a token or a name
       from `ctx.metadata` in each handler and answer `scUnauthenticated` or
       `scPermissionDenied`, or do it once for every method in a server interceptor
-      ([interceptors.md](interceptors.md)); it sees the metadata only, not the client's certificate.
+      ([interceptors.md](interceptors.md)); it sees the metadata and, with mutual TLS, `ctx.peer`.
 - [ ] Reflection tells anyone who can connect the names and types of the services. Register
       it only where that is wanted.
 - [ ] Handlers raise `GrpcError` with a text meant for the client. Other exceptions become
@@ -97,6 +113,38 @@ Set by default, check that they suit you:
 - [ ] `newHealth(maxWatches = 64)`, `newReflection(maxStreams = 16)` on the blocking server.
 - [ ] `pingPolicy`: off by default; set `minIntervalMs` to refuse clients that ping too often.
 - [ ] No rate limit of calls exists. Put one in front or in the handlers if you need it.
+
+## Availability under load (the blocking server)
+
+A blocking server runs `maxWorkers` handlers at once; what arrives beyond that waits, and the limits below
+say how much may wait and how long a call may hold a worker. Set them from a memory budget and the lifetime
+of the streams you serve, not from the defaults.
+
+- [ ] **Memory.** `Limits.maxQueuedBytes` (256 MiB) bounds the request bytes held for calls that have no
+      worker; take it from what the process can spare. It does not count what the running handlers hold,
+      the buffers of compression, or the buffers of TLS (about 42 KiB for each connection) or of the
+      connections themselves: leave room for them.
+- [ ] **Workers for unary calls.** Long streaming calls hold their workers. Set `Limits.maxStreamingCalls`
+      to about half of `maxWorkers`, and the next streaming call is answered at once with
+      RESOURCE_EXHAUSTED, so that short calls always find a worker. `tools/admission.nim` measures it (8
+      workers, 24 threads that keep a streaming call open for 2 s, 4 threads that call a unary method; one
+      run each, 2026-11-22, Linux x86-64, `-d:release`, client and server in one process):
+
+      | `maxStreamingCalls` | unary calls in 10 s | unary p50 | unary p99 | streaming calls refused | resident size, peak |
+      |---|---|---|---|---|---|
+      | 0 (no quota) | 24 | 1998 ms | 1998 ms | 0 | 15 MiB |
+      | 4 | 18,358 | 0.12 ms | 0.22 ms | 1,966,602 | 16 MiB |
+
+      With a queue of 8 calls as well (`--queue 8 --bytes-mib 1`) the p99 of the unary calls was 20 ms and
+      38,697 calls were refused by the queue limit: a queue that is too short refuses short calls too.
+- [ ] **Watch it.** `srv.stats()` has the gauges (`queuedCalls`, `queuedBytes`, `runningStreaming`) and the
+      counters (`refusedQueue`, `refusedBytes`, `shedBytes`, `refusedStreaming`) of these limits; the chronos
+      server has `refusedStreaming` and `runningStreaming`. Alert on a refusal rate that stays above zero:
+      a limit is too low, or clients come in faster than the server takes them. Acceptance for a service:
+      a resident size under its ceiling and a unary p99 that holds under a sustained load of long streams,
+      measured with `tools/admission.nim` or a load test of your own.
+- [ ] `maxConnectionsPerIp` counts the address the connection comes from: behind a proxy that is the proxy's,
+      and one cap then limits unrelated clients together. Set it only where clients connect directly.
 
 ## Seeing what happens
 
