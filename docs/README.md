@@ -21,6 +21,7 @@ a **how-to** does one task, a **reference** is complete and dry, an **explanatio
 | [h2spec.md](h2spec.md) | reference | the h2spec results and the known failures |
 | [security-requirements.md](security-requirements.md) | reference | what a user can and cannot expect in security |
 | [security-policies.md](security-policies.md) | reference | the rules the project holds itself to |
+| [audits/README.md](audits/README.md) | reference | the security reviews and what became of their findings |
 | [roadmap.md](roadmap.md) | reference | what is planned, considered and not intended |
 | [../CHANGELOG.md](../CHANGELOG.md) | reference | what changed in each release |
 | [architecture.md](architecture.md) | explanation | the parts, who acts and what each action does |
