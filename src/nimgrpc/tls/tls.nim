@@ -52,6 +52,7 @@ proc gtls_pull_app(t: GtlsConnP; data: ptr byte; cap: csize_t): csize_t
 proc gtls_close(t: GtlsConnP)
 proc gtls_alpn(t: GtlsConnP): cstring
 proc gtls_peer_ok(t: GtlsConnP): cint
+proc gtls_peer_cert(t: GtlsConnP; len: ptr csize_t): ptr byte
 proc gtls_resumed(t: GtlsConnP): cint
 proc gtls_alpn_refused(t: GtlsConnP): cint
 {.pop.}
@@ -85,6 +86,7 @@ proc `=copy`(dst: var TlsConfigObj; src: TlsConfigObj) {.error.}
 
 proc `=destroy`(t: TlsConnObj) =
   if not t.raw.isNil: gtls_free(t.raw)
+  `=destroy`(t.why.addr[])   # a type with its own `=destroy` must free its own fields
 proc `=copy`(dst: var TlsConnObj; src: TlsConnObj) {.error.}
 
 proc bytesOf(s: string): ptr byte =
@@ -223,6 +225,7 @@ proc errorMessage*(t: TlsConn): string =
   of 35: "TLS: the peer presented no certificate"
   of 54: "TLS: certificate expired or not yet valid"
   of 56: "TLS: server name does not match the certificate"
+  of 50: "TLS: certificate exceeds a limit (a client certificate of more than 128 KiB)"
   of 62: "TLS: certificate not signed by a trusted CA"
   else:
     if e >= 512: "TLS: sent fatal alert " & $(e - 512)
@@ -262,6 +265,18 @@ proc checkPeer*(t: TlsConn) =
   ## ignored the exception (or calls this too late) still sends and receives nothing.
   t.settle()
   if t.peer == psFailed: raise newException(TlsError, t.why)
+
+proc peerCert*(t: TlsConn): seq[byte] =
+  ## A server that asks for client certificates: the DER of the certificate of the client, once
+  ## the peer is verified (also on a resumed session: it is the certificate of the connection
+  ## the session was made on). Empty without mutual TLS, and before the handshake is done.
+  t.settle()
+  if t.peer != psVerified: return
+  var n: csize_t
+  let p = gtls_peer_cert(t.raw, n.addr)
+  if p != nil and n > 0:
+    result = newSeq[byte](int(n))
+    copyMem(result[0].addr, p, int(n))
 
 proc pushRecords*(t: TlsConn; data: openArray[byte]): int =
   ## Feeds bytes from the network; returns how many were taken.

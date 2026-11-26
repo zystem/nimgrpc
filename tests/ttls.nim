@@ -534,6 +534,18 @@ suite "the peer is verified before data moves":
     check "the client presented no certificate" in messageOf(proc () = a.s.checkPeer())
     check a.s.pushApp(@[1'u8]) == 0
 
+  test "a failed peer whose reason is a computed text: the text goes with the connection":
+    # "TLS: peer sent fatal alert N" is built at run time. `TlsConnObj` has its own `=destroy`,
+    # which did not free that text: the weekly fuzz run found it (issues 75, 76, 77, 40 MB in the
+    # mutation fuzzer). It shows as a leak at exit, so it is checked by the run of this file
+    # under LeakSanitizer (`nimble asan`); here, that the reason is the right one.
+    let sc = tlsServerConfig(pem"server.pem", pem"server.key")
+    let alert = @[0x15'u8, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28]   # a fatal alert, handshake_failure
+    for i in 0 ..< 200:
+      let s = newServerTls(sc)
+      s.feed(alert)
+      check "peer sent fatal alert 40" in messageOf(proc () = s.checkPeer())
+
   test "a verified peer stays verified, and data moves without a call of checkPeer first":
     let a = connect(tlsClientConfig(pem"ca.pem"),
                     tlsServerConfig(pem"server.pem", pem"server.key"))

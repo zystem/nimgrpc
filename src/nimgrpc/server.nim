@@ -15,10 +15,11 @@
 ## not sent to the client. `setErrorHook` gives the operator the real exception.
 
 import std/[tables, strutils, algorithm, atomics]
-import ./status, ./wire, ./h2/blocking, ./compress/gzip
+import ./status, ./wire, ./h2/blocking, ./compress/gzip, ./tls/peerid
 export status, blocking.TlsConfig, blocking.tlsClientConfig, blocking.tlsServerConfig,
        blocking.TlsError, blocking.Keepalive, blocking.PingPolicy, blocking.Limits, blocking.CipherOrder,
-       blocking.setCipherOrder, blocking.setSessionLifetime, blocking.defaultSessionLifetime
+       blocking.setCipherOrder, blocking.setSessionLifetime, blocking.defaultSessionLifetime,
+       peerid.PeerIdentity
 
 type
   ServerContext* = object
@@ -31,6 +32,11 @@ type
     responseCompression*: string
       ## "gzip" to compress responses; set before the first message is sent.
       ## Ignored if the client does not accept gzip.
+    peer*: PeerIdentity
+      ## Who the client is, when it authenticated with a certificate (mutual TLS, see
+      ## `tlsServerConfig(clientCaPem = ...)`): `peer.authenticated`, and the names in the
+      ## certificate. Read from the certificate alone, never from `metadata`. Without mutual TLS
+      ## it is empty (`authenticated` is false).
     stream: ptr ServerStream
 
   ServerCall* = object
@@ -324,6 +330,8 @@ proc handle(st: var ServerStream; userData: pointer) {.nimcall, gcsafe, raises: 
     st.setTimeout(ctx.timeoutMs, answer = true)   # the client's deadline: answer it with a status
   ctx.stream = st.addr
   ctx.metadata = fromWire(st.headers)
+  let clientCert = st.peerCert()
+  if clientCert.len > 0: ctx.peer = parsePeerCert(clientCert)
   var call = ServerCall(st: st.addr, ctx: ctx.addr, maxMessage: reg.maxMessage,
                         reqEncoding: encoding, clientAcceptsGzip: acceptsGzip)
 

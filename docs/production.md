@@ -49,18 +49,19 @@ measured in a large deployment ([security-requirements.md](security-requirements
 - [ ] Renewal: there is no reload. A new certificate needs a new server, so plan a restart
       (`stop(graceMs)`) before the old one ends, and watch the end date from outside.
 - [ ] Revocation is not checked (no CRL, no OCSP). To cut a client off, change the CA or
-      refuse it in the handler by metadata. **Session resumption** keeps a peer that holds a
+      refuse it by name (`ctx.peer`, its fingerprint say) in an interceptor. **Session resumption** keeps a peer that holds a
       session for ten minutes without a new certificate check: `setSessionLifetime(0)` turns
       it off.
-- [ ] Mutual TLS (`clientCaPem`) admits a client whose certificate the CA signed. The handler
-      is not told which client it is: authorization needs metadata as well.
+- [ ] Mutual TLS (`clientCaPem`) admits a client whose certificate the CA signed. Which client it
+      is, the handler and the interceptor read from `ctx.peer`: authorization is still the
+      program's job.
 
 ## Who may call what
 
 - [ ] The library has no authentication or authorization of calls. Check a token or a name
       from `ctx.metadata` in each handler and answer `scUnauthenticated` or
       `scPermissionDenied`, or do it once for every method in a server interceptor
-      ([interceptors.md](interceptors.md)); it sees the metadata only, not the client's certificate.
+      ([interceptors.md](interceptors.md)); it sees the metadata and, with mutual TLS, `ctx.peer`.
 - [ ] Reflection tells anyone who can connect the names and types of the services. Register
       it only where that is wanted.
 - [ ] Handlers raise `GrpcError` with a text meant for the client. Other exceptions become
@@ -105,6 +106,10 @@ Set by default, check that they suit you:
       worker (set it to about half of `maxWorkers`; the rest get RESOURCE_EXHAUSTED at once), and
       `Limits.maxStreamingCallMs` (0: `maxCallMs` applies) gives streaming calls their own
       time limit, longer or shorter than the one of the other calls, or none (-1).
+- [ ] Authorisation by who the client is: with mutual TLS, `ctx.peer` (in a handler or an interceptor) has the
+      names in the client's certificate; decide by `uris` (a SPIFFE ID), `fingerprint` or `dnsNames`, compare
+      them exactly, and trust the CA of `clientCaPem` for those names only. Without mutual TLS `ctx.peer.authenticated`
+      is false. See [interceptors.md](interceptors.md).
 - [ ] `newHealth(maxWatches = 64)`, `newReflection(maxStreams = 16)` on the blocking server.
 - [ ] `pingPolicy`: off by default; set `minIntervalMs` to refuse clients that ping too often.
 - [ ] No rate limit of calls exists. Put one in front or in the handlers if you need it.

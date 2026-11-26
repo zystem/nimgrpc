@@ -54,7 +54,7 @@ jobs:
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX=/opt/nghttp2
           cmake --build build -j
           sudo cmake --install build
-      - uses: jiro4989/setup-nim-action@efd7b4f2cab6441597916438c4f03425167d453b # v2.4.0
+      - uses: jiro4989/setup-nim-action@08957181dc5baf5f8446497598f798020a03e66a # v2.5.1
         with:
           nim-version: 2.2.14
           repo-token: ${{ secrets.GITHUB_TOKEN }}

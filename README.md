@@ -205,6 +205,13 @@ let ch = dial("10.0.0.5", 50051,
   serverName = "api.internal")   # checked against the certificate's DNS names (an IP address: its IP entries)
 ```
 
+Who the client is: on a server with `clientCaPem`, `ctx.peer` (in a handler, and in an
+interceptor, on both servers) holds what the client's certificate says: `ctx.peer.authenticated`,
+`subject` (the common name), `dnsNames`, `uris` (a SPIFFE ID is one), `emails`, `ipAddresses` and the
+SHA-256 `fingerprint`. It is read from the certificate alone, so metadata cannot change it, and a
+resumed TLS session keeps the identity of the connection it was made on. Compare names exactly;
+[docs/interceptors.md](docs/interceptors.md) has an interceptor that lets in one SPIFFE ID.
+
 gzip compression: clients pass `compression = "gzip"` to a call (every
 message, or per message with `send(msg, compressed)`); handlers set
 `ctx.responseCompression = "gzip"`. Both sides always accept gzip, and

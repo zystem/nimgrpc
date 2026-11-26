@@ -22,10 +22,11 @@
 
 import std/[tables, strutils, options, algorithm]
 import pkg/chronos
-import ./status, ./wire, ./h2/async, ./compress/gzip
+import ./status, ./wire, ./h2/async, ./compress/gzip, ./tls/peerid
 export status, options, async.TlsConfig, async.tlsClientConfig, async.tlsServerConfig,
        async.TlsError, async.Keepalive, async.PingPolicy, async.Limits, async.CipherOrder,
-       async.setCipherOrder, async.setSessionLifetime, async.defaultSessionLifetime
+       async.setCipherOrder, async.setSessionLifetime, async.defaultSessionLifetime,
+       peerid.PeerIdentity
 
 type
   AsyncServerContext* = ref object
@@ -38,6 +39,11 @@ type
     responseCompression*: string
       ## "gzip" to compress responses; set before the first message is sent.
       ## Ignored if the client does not accept gzip.
+    peer*: PeerIdentity
+      ## Who the client is, when it authenticated with a certificate (mutual TLS, see
+      ## `tlsServerConfig(clientCaPem = ...)`): `peer.authenticated`, and the names in the
+      ## certificate. Read from the certificate alone, never from `metadata`. Without mutual TLS
+      ## it is empty (`authenticated` is false).
     stream: AsyncH2Stream
 
   AsyncServerCall* = ref object
@@ -302,6 +308,8 @@ proc handle(s: AsyncGrpcServer; st: AsyncH2Stream): Future[void] {.async: (raise
     st.setTimeout(ctx.timeoutMs, answer = true)   # the client's deadline: answer it with a status
   ctx.stream = st
   ctx.metadata = fromWire(st.headers)
+  let clientCert = st.peerCert()
+  if clientCert.len > 0: ctx.peer = parsePeerCert(clientCert)
   let call = AsyncServerCall(st: st, ctx: ctx, maxMessage: s.maxMessage,
                              reqEncoding: encoding, clientAcceptsGzip: acceptsGzip)
   if encoding.len > 0 and encoding notin supportedEncodings:

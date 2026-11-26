@@ -548,6 +548,7 @@ typedef struct {
     unsigned char *leaf;
     size_t leaf_len, leaf_cap;
     int leaf_bad;                  /* the leaf was too large to keep */
+    int capture;                   /* keep the leaf for the application too (a server that asks for client certificates) */
 } x509_watch;
 
 /* ---- the iPAddress entries of a certificate (DER, just enough of it) */
@@ -633,7 +634,7 @@ static void xw_start_cert(const br_x509_class **ctx, uint32_t len) {
 }
 static void xw_append(const br_x509_class **ctx, const unsigned char *buf, size_t len) {
     x509_watch *w = (x509_watch *)ctx;
-    if (w->want_ip && w->cert_idx == 0 && !w->leaf_bad) {
+    if ((w->want_ip || w->capture) && w->cert_idx == 0 && !w->leaf_bad) {
         if (w->leaf_len + len > LEAF_MAX) {
             w->leaf_bad = 1;
         } else {
@@ -659,6 +660,10 @@ static unsigned xw_end_chain(const br_x509_class **ctx) {
     if (r == 0 && w->want_ip &&
         (w->leaf_bad || !cert_has_ip(w->leaf, w->leaf_len, w->ip, w->want_ip)))
         r = BR_ERR_X509_BAD_SERVER_NAME;
+    /* A client certificate that chains to a trusted CA but whose bytes we could not keep has no
+     * identity to give the application: refused, not accepted without one. */
+    if (r == 0 && w->capture && (w->leaf_bad || w->leaf_len == 0))
+        r = BR_ERR_X509_LIMIT_EXCEEDED;
     w->validated = (r == 0);
     return r;
 }
@@ -734,6 +739,18 @@ static const br_ssl_server_policy_class policy_class = {
  * are kept (checked in `cache_save`).
  */
 
+/* A resumed session presents no certificate, so a server that asks for client certificates keeps
+ * the leaf of each session it saves, next to the session, under the session id: the identity of
+ * a resumed connection is that of the connection the session was made on. A session whose
+ * identity is not here (the table is smaller than the cache, and goes with it) is not resumed. */
+#define IDENT_SLOTS 512
+typedef struct {
+    unsigned char id[32];
+    size_t id_len;
+    unsigned char *der;
+    size_t der_len;
+} ident_slot;
+
 typedef struct gtls_cache {
     const br_ssl_session_cache_class *vt;
     br_ssl_session_cache_lru lru;
@@ -741,13 +758,43 @@ typedef struct gtls_cache {
     unsigned char *buf;
     long long epoch;
     int lifetime;
+    ident_slot ident[IDENT_SLOTS];
+    unsigned ident_next;
 } gtls_cache;
+
+static void ident_clear(gtls_cache *k) {
+    for (int i = 0; i < IDENT_SLOTS; i++) { free(k->ident[i].der); }
+    memset(k->ident, 0, sizeof k->ident);
+    k->ident_next = 0;
+}
+
+static void ident_put(gtls_cache *k, const unsigned char *id, size_t id_len,
+                      const unsigned char *der, size_t der_len) {
+    if (id_len == 0 || id_len > sizeof k->ident[0].id) return;
+    ident_slot *sl = &k->ident[k->ident_next++ % IDENT_SLOTS];
+    free(sl->der);
+    sl->der = dupmem(der, der_len);
+    sl->der_len = sl->der ? der_len : 0;
+    sl->id_len = sl->der ? id_len : 0;
+    if (sl->der) memcpy(sl->id, id, id_len);
+}
+
+static const ident_slot *ident_get(const gtls_cache *k, const unsigned char *id, size_t id_len) {
+    /* the id is what the client offers: every slot is looked at, each in constant time */
+    const ident_slot *found = NULL;
+    for (int i = 0; i < IDENT_SLOTS; i++) {
+        const ident_slot *sl = &k->ident[i];
+        if (sl->der && sl->id_len == id_len && ct_eq(sl->id, id, id_len)) found = sl;
+    }
+    return found;
+}
 
 static void cache_expire(gtls_cache *k) {
     long long now = now_s();
     if (now - k->epoch >= k->lifetime) {
         secure_zero(k->buf, CACHE_BYTES);      /* the old sessions' master secrets, not only forgotten */
         br_ssl_session_cache_lru_init(&k->lru, k->buf, CACHE_BYTES);
+        ident_clear(k);
         k->epoch = now;
     }
 }
@@ -756,10 +803,12 @@ static void cache_save(const br_ssl_session_cache_class **ctx, br_ssl_server_con
                        const br_ssl_session_parameters *params) {
     gtls_cache *k = (gtls_cache *)ctx;
     gtls_conn *t = (gtls_conn *)sc;            /* the server context is the first member */
-    if (t->verify_peer && !t->watch.validated) return;
+    if (t->verify_peer && (!t->watch.validated || t->watch.leaf_bad || t->watch.leaf_len == 0)) return;
     pthread_mutex_lock(&k->mu);
     cache_expire(k);
     k->lru.vtable->save(&k->lru.vtable, sc, params);
+    if (t->verify_peer)
+        ident_put(k, params->session_id, params->session_id_len, t->watch.leaf, t->watch.leaf_len);
     pthread_mutex_unlock(&k->mu);
 }
 
@@ -770,6 +819,19 @@ static int cache_load(const br_ssl_session_cache_class **ctx, br_ssl_server_cont
     pthread_mutex_lock(&k->mu);
     cache_expire(k);
     int r = k->lru.vtable->load(&k->lru.vtable, sc, params);
+    if (r && t->verify_peer) {
+        /* the client of this session was authenticated by a certificate: it is still this one */
+        const ident_slot *sl = ident_get(k, params->session_id, params->session_id_len);
+        unsigned char *copy = sl ? dupmem(sl->der, sl->der_len) : NULL;
+        if (!copy) {
+            r = 0;                              /* no identity to give: a full handshake */
+        } else {
+            free(t->watch.leaf);
+            t->watch.leaf = copy;
+            t->watch.leaf_len = t->watch.leaf_cap = sl->der_len;
+            t->watch.leaf_bad = 0;
+        }
+    }
     pthread_mutex_unlock(&k->mu);
     if (r) t->resumed = 1;
     return r;
@@ -782,6 +844,7 @@ static const br_ssl_session_cache_class cache_class = {
 static void cache_free(gtls_cache *k) {
     if (!k) return;
     pthread_mutex_destroy(&k->mu);
+    ident_clear(k);
     secure_zero(k->buf, CACHE_BYTES);          /* sessions with their master secrets */
     free(k->buf);
     secure_zero(k, sizeof *k);
@@ -1007,6 +1070,7 @@ gtls_conn *gtls_server_new(gtls_conf *c) {
         br_ssl_engine_set_default_rsavrfy(t->eng);
         br_ssl_engine_set_ecdsa(t->eng, br_ecdsa_vrfy_asn1_get_default());
         t->verify_peer = 1;
+        t->watch.capture = 1;        /* the client's certificate is the identity the handlers see */
     }
     if (!br_ssl_server_reset(&t->u.server)) {
         secure_zero(t, sizeof *t);
@@ -1128,4 +1192,14 @@ int gtls_peer_ok(gtls_conn *t) {
         secure_zero(&p, sizeof p);
     }
     return ok;
+}
+
+/* The leaf certificate (DER) of the client of a server that asks for client certificates, once the
+ * handshake is done and the peer is authenticated; NULL if there is none. The bytes belong to
+ * the connection and stay as long as it does. */
+const unsigned char *gtls_peer_cert(gtls_conn *t, size_t *len) {
+    if (!t->is_server || !t->verify_peer || t->watch.leaf_bad || t->watch.leaf_len == 0) return NULL;
+    if (!gtls_peer_ok(t)) return NULL;
+    *len = t->watch.leaf_len;
+    return t->watch.leaf;
 }
