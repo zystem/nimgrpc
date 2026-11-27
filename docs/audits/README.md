@@ -9,7 +9,7 @@ Reference: the reviews of the library and what became of their findings.
 
 Each report speaks of its own revision and is not updated: what it says is missing may exist now.
 The links to files lead to the current code, not to the reviewed revision. The tables below say
-what was done up to 26 November 2026; [../../CHANGELOG.md](../../CHANGELOG.md) has the details,
+what was done up to 27 November 2026; [../../CHANGELOG.md](../../CHANGELOG.md) has the details,
 with what was and was not run.
 
 ## 21 November
@@ -34,7 +34,7 @@ with what was and was not run.
 | Limits off by default, availability under load | documented, with counters and a load test (`tools/admission.nim`); the defaults did not change | pull request 81 |
 | Client identity and revocation | identity: `ctx.peer`. **Revocation is not checked** | pull requests 78, 81 |
 | Precondition of building a config on one thread; the C comment on threads; the allocation test | fixed | pull request 81 |
-| The TLS pump takes 16 KiB before it knows what is ready | open: not profiled | |
+| The TLS pump takes 16 KiB before it knows what is ready | fixed: profiling showed that a peer that does not read could make a connection take hundreds of MiB | release 0.8.0, [../../CHANGELOG.md](../../CHANGELOG.md), "Security" |
 | TLS 1.3 | open | |
 
 What to set on a server that faces clients is in [../production.md](../production.md).
