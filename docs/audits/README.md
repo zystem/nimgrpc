@@ -34,7 +34,7 @@ with what was and was not run.
 | Limits off by default, availability under load | documented, with counters and a load test (`tools/admission.nim`); the defaults did not change | pull request 81 |
 | Client identity and revocation | identity: `ctx.peer`. **Revocation is not checked** | pull requests 78, 81 |
 | Precondition of building a config on one thread; the C comment on threads; the allocation test | fixed | pull request 81 |
-| The TLS pump takes 16 KiB before it knows what is ready | fixed: profiling showed that a peer that does not read could make a connection take hundreds of MiB | release 0.8.0, [../../CHANGELOG.md](../../CHANGELOG.md), "Security" |
+| The TLS pump takes 16 KiB before it knows what is ready | fixed: profiling showed that a peer that does not read could make a connection take hundreds of MiB | release 0.8.0, [GHSA-6p4v-6g7c-g9hv](https://github.com/zystem/nimgrpc/security/advisories/GHSA-6p4v-6g7c-g9hv) |
 | TLS 1.3 | open | |
 
 What to set on a server that faces clients is in [../production.md](../production.md).
