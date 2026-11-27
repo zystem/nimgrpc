@@ -48,6 +48,8 @@ proc gtls_push_records(t: GtlsConnP; data: ptr byte; len: csize_t): csize_t
 proc gtls_pull_records(t: GtlsConnP; data: ptr byte; cap: csize_t): csize_t
 proc gtls_push_app(t: GtlsConnP; data: ptr byte; len: csize_t): csize_t
 proc gtls_flush(t: GtlsConnP)
+proc gtls_ready_records(t: GtlsConnP): csize_t
+proc gtls_ready_app(t: GtlsConnP): csize_t
 proc gtls_pull_app(t: GtlsConnP; data: ptr byte; cap: csize_t): csize_t
 proc gtls_close(t: GtlsConnP)
 proc gtls_alpn(t: GtlsConnP): cstring
@@ -293,9 +295,12 @@ proc pullApp*(t: TlsConn; dst: var seq[byte]) =
   t.checkPeer()
   if t.peer != psVerified: return
   while true:
+    # Room for exactly what is ready (see gtls_ready_app): never ahead of the question.
+    let ready = gtls_ready_app(t.raw).int
+    if ready == 0: break
     let start = dst.len
-    dst.setLenUninit(start + 16384)
-    let n = gtls_pull_app(t.raw, dst[start].addr, 16384).int
+    dst.setLenUninit(start + ready)
+    let n = gtls_pull_app(t.raw, dst[start].addr, csize_t(ready)).int
     dst.setLen(start + n)
     if n == 0: break
 
@@ -315,11 +320,14 @@ proc pushApp*(t: TlsConn; data: openArray[byte]): int =
 proc flush*(t: TlsConn) = gtls_flush(t.raw)
 
 proc pullRecords*(t: TlsConn): seq[byte] =
-  ## Records ready for the network.
+  ## Records ready for the network. The result takes the memory of what it holds: the adapters
+  ## queue it as it is, and the limit of that queue counts bytes.
   while true:
+    let ready = gtls_ready_records(t.raw).int
+    if ready == 0: break
     let start = result.len
-    result.setLenUninit(start + 16384)
-    let n = gtls_pull_records(t.raw, result[start].addr, 16384).int
+    result.setLenUninit(start + ready)
+    let n = gtls_pull_records(t.raw, result[start].addr, csize_t(ready)).int
     result.setLen(start + n)
     if n == 0: break
 

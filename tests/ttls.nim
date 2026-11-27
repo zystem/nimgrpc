@@ -585,3 +585,54 @@ suite "after a change of policy":
     let b = connect(cc, sc)
     b.c.checkPeer(); b.s.checkPeer()
     check not b.s.resumed                        # every connection shows its certificate
+
+suite "the pump takes only the memory it fills":
+  # The adapters keep what `pullRecords` returns in the send queue, whose limit counts bytes: a
+  # buffer larger than its content makes the memory of a queue many times its limit.
+  const slack = 64                              # an allocator may round a size up
+
+  proc pair(): tuple[c, s: TlsConn] =
+    result = connect(tlsClientConfig(pem"ca.pem"),
+                     tlsServerConfig(pem"server.pem", pem"server.key"))
+    result.c.checkPeer(); result.s.checkPeer()
+    result.s.feed(result.c.pullRecords())
+    result.c.feed(result.s.pullRecords())
+
+  test "a poll with nothing ready allocates nothing":
+    let p = pair()
+    let records = p.s.pullRecords()
+    check records.len == 0
+    check records.capacity == 0
+    var plain: seq[byte]
+    p.s.pullApp(plain)
+    check plain.len == 0
+    check plain.capacity == 0
+
+  test "a small record and its plaintext are not held in larger buffers":
+    let p = pair()
+    let sent = newSeq[byte](17)                 # the size of an HTTP/2 PING frame
+    check p.s.pushApp(sent) == sent.len
+    p.s.flush()
+    let records = p.s.pullRecords()
+    check records.len > sent.len
+    check records.capacity <= records.len + slack
+    p.c.feed(records)
+    var plain: seq[byte]
+    p.c.pullApp(plain)
+    check plain == sent
+    check plain.capacity <= plain.len + slack
+
+  test "a full record is not held in a buffer of twice its size":
+    let p = pair()
+    var sent = newSeq[byte](16384)
+    for i in 0 ..< sent.len: sent[i] = byte(i mod 251)
+    let taken = p.s.pushApp(sent)
+    check taken > 0
+    p.s.flush()
+    let records = p.s.pullRecords()
+    check records.capacity <= records.len + slack
+    p.c.feed(records)
+    var plain: seq[byte]
+    p.c.pullApp(plain)
+    check plain == sent[0 ..< taken]
+    check plain.capacity <= plain.len + slack
