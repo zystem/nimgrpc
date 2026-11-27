@@ -1115,6 +1115,23 @@ size_t gtls_push_records(gtls_conn *t, const unsigned char *data, size_t len) {
     return n;
 }
 
+/* Bytes of records ready for the network, and of plaintext ready to be read. The caller asks
+   before it makes room: an empty poll then allocates nothing, and a small record does not sit in a
+   buffer of 16 KiB or more, which a limit on the bytes of a queue would not see. */
+size_t gtls_ready_records(gtls_conn *t) {
+    if (!(br_ssl_engine_current_state(t->eng) & BR_SSL_SENDREC)) return 0;
+    size_t len;
+    br_ssl_engine_sendrec_buf(t->eng, &len);
+    return len;
+}
+
+size_t gtls_ready_app(gtls_conn *t) {
+    if (!(br_ssl_engine_current_state(t->eng) & BR_SSL_RECVAPP)) return 0;
+    size_t len;
+    br_ssl_engine_recvapp_buf(t->eng, &len);
+    return len;
+}
+
 /* Records for the network. Returns bytes written to `out`. */
 size_t gtls_pull_records(gtls_conn *t, unsigned char *out, size_t cap) {
     if (!(br_ssl_engine_current_state(t->eng) & BR_SSL_SENDREC)) return 0;
