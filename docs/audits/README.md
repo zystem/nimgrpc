@@ -31,8 +31,8 @@ with what was and was not run.
 |---|---|---|
 | The byte budget was checked and taken in two steps; trailers were not charged | fixed | pull request 81 |
 | `realloc` could leave a private key in memory | fixed; the PEM string the program passes stays its own to wipe | pull request 81 |
-| Limits off by default, availability under load | documented, with counters and a load test (`tools/admission.nim`); `maxConnections` (4096) and `maxConnectionIdleMs` (15 minutes) are on by default now; the limits that would cut long streams stay off | pull request 81, CHANGELOG |
-| Client identity and revocation | identity: `ctx.peer`. Revocation: a deny list by fingerprint (`denyCertificate`); **no CRL, no OCSP** | pull requests 78, 81, CHANGELOG |
+| Limits off by default, availability under load | documented, with counters and a load test (`tools/admission.nim`); `maxConnections` (4096) and `maxConnectionIdleMs` (15 minutes) are on by default since 0.9.0; the limits that would cut long streams stay off | pull request 81, release 0.9.0 |
+| Client identity and revocation | identity: `ctx.peer`. Revocation: a deny list by fingerprint (`denyCertificate`); **no CRL, no OCSP** | pull requests 78, 81, release 0.9.0 |
 | Precondition of building a config on one thread; the C comment on threads; the allocation test | fixed | pull request 81 |
 | The TLS pump takes 16 KiB before it knows what is ready | fixed: profiling showed that a peer that does not read could make a connection take hundreds of MiB | release 0.8.0, [GHSA-6p4v-6g7c-g9hv](https://github.com/zystem/nimgrpc/security/advisories/GHSA-6p4v-6g7c-g9hv) |
 | TLS 1.3 | open, put off on 28 November 2026 | |
