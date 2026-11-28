@@ -2,11 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+- **The blocking server and client did not compile on arm64** (or any CPU but amd64): "cannot evaluate at compile time: CLOCK_MONOTONIC". On those CPUs `std/posix` takes the constant from the C header, and the library used it in a `const`. Found by the first CI run on arm64. `nim check --cpu:arm64` reproduces it on any machine. Releases 0.3.0 to 0.8.0 have it.
+
 ### Changed
 - **Two limits of a server are on by default** (what the audits of 2026-11-21 and 2026-11-22 left open): `Limits.maxConnections` is 4096 (was 0, no limit) and `Limits.maxConnectionIdleMs` is 15 minutes (was 0, never). 0 still means no limit. Left off, because they would cut or refuse long streams that are meant to stay open: `maxCallMs`, `maxStreamingCalls`, `maxConnectionAgeMs`, `pingPolicy`, and `maxConnectionsPerIp` (which a proxy makes wrong). See [docs/upgrading.md](docs/upgrading.md).
 
 ### Added
 - CI runs the tests on arm64 too (Ubuntu 24.04, Nim 2.4.0).
+- A long soak (`tools/soak.sh`, the chronos server, 2026-11-28, revision 64aeced, 8 hours each, plain and TLS side by side on one x86-64 host): 43,292,259 connections opened and closed without TLS and 5,673,739 with it; resident size from the middle of the run to its end 37,696 to 37,708 KiB and 74,028 to 74,028 KiB; no descriptor left behind. 1000 held connections took 30 KiB each (67 KiB with TLS). The blocking server was not soaked.
 - `tests/tcryptoimpl.nim`: a connection must pick, for the data that is secret (AES, GHASH, ChaCha20, Poly1305, the elliptic curves, the RSA and ECDSA private operations), an implementation that BearSSL writes to run in constant time. It looks at the choice, not at what the compiler made of it, and measures no time.
 - **A deny list of certificates**, the answer to revocation that the audit of 2026-11-22 found missing: `TlsConfig.denyCertificate(sha256Fingerprint)`. A peer, client or server, that presents a certificate of the list, as its own or as another certificate of its chain, is refused in the handshake ("TLS: the peer's certificate is on the deny list"). It is not CRL or OCSP checking: the program keeps the list. It is part of the config, which cannot change once in use, so a new entry needs a new config and server. Tests: `tests/ttls.nim`, suite "the deny list" (five of seven fail without the check in `gtls.c`).
 

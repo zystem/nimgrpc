@@ -38,6 +38,7 @@ with what was and was not run.
 | TLS 1.3 | open, put off on 28 November 2026 | |
 | Constant time of the cryptographic backend | partly: the implementations chosen are pinned by `tests/tcryptoimpl.nim`; no timing measurement | CHANGELOG |
 | ARM | the tests run on arm64 in CI; the static size was not measured there | [../supported-versions.md](../supported-versions.md) |
+| Long soak | the chronos server, 8 hours, plain and TLS: memory and descriptors held steady; the blocking server: not run | CHANGELOG |
 | Replacing certificates without a restart | not done, by decision: start a new server | [../production.md](../production.md) |
 
 What to set on a server that faces clients is in [../production.md](../production.md).

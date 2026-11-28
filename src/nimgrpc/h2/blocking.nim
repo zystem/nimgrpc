@@ -220,11 +220,13 @@ converter toPtr(c: Conn): ptr ConnObj = c[].addr
 # ------------------------------------------------------------ time
 
 when defined(linux):
-  const timedClock = CLOCK_MONOTONIC
+  template timedClock: untyped = CLOCK_MONOTONIC
     ## The clock of every deadline and timed wait: a step of the wall clock (NTP,
     ## a resumed virtual machine) must not shorten or stretch a timeout.
+    ## A template, not a `const`: on every CPU but amd64 `std/posix` takes CLOCK_MONOTONIC
+    ## from the C header, so the compiler does not know its value (arm64 did not build).
 else:
-  const timedClock = CLOCK_REALTIME    # no pthread_condattr_setclock here
+  template timedClock: untyped = CLOCK_REALTIME    # no pthread_condattr_setclock here
 
 proc initTimedCond(c: var Cond) =
   ## A condition variable whose timed waits count on `timedClock`.
