@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.0 — 2026-11-28
+
 ### Fixed
 - **The blocking server and client did not compile on arm64** (or any CPU but amd64): "cannot evaluate at compile time: CLOCK_MONOTONIC". On those CPUs `std/posix` takes the constant from the C header, and the library used it in a `const`. Found by the first CI run on arm64. `nim check --cpu:arm64` reproduces it on any machine. Releases 0.3.0 to 0.8.0 have it.
 

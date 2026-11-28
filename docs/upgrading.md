@@ -4,8 +4,10 @@ The latest release is supported ([SECURITY.md](../SECURITY.md)). Read the notes 
 
 General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new commit); rebuild nghttp2 if [building.md](building.md) names a new version; regenerate the code of your `.proto` files with the new `protoc-gen-nim` (generated code and the library are versioned together); run your tests.
 
-## Unreleased
+## 0.9.0
 
+- **On arm64** (or any CPU but amd64) the blocking server and client of releases 0.3.0 to 0.8.0 do not compile; this one does. The number is 0.9 because of the two new defaults below.
+- **nghttp2, BearSSL, zlib**: unchanged (nghttp2 1.71.0 in the CI, `bearssl` 0.3.1 the lowest, the system's zlib). Advisories read on 2026-11-28: nghttp2 none after GHSA-6933-cjhr-5qg6 (fixed in 1.68.1); zlib as for 0.8.0 below; for BearSSL a published finding of a missing length check of CBC records ([ANT-2026-45SRWS4Q](https://red.anthropic.com/2026/cvd/findings/ANT-2026-45SRWS4Q), no CVE) does not apply: the copy in `bearssl` 0.3.1 has the check, and the library offers no CBC suite.
 - **A server serves at most 4096 connections at once** (`Limits.maxConnections`; before, no limit). One more is closed as soon as it is accepted. A server with more clients raises it; 0 means no limit.
 - **A server closes a connection with no call for 15 minutes** (`Limits.maxConnectionIdleMs`; before, never): GOAWAY, then the close. A channel of this library, and of gRPC, dials again at its next call; a connection with a call open is not idle. A streaming call that is started in the very moment of the GOAWAY fails with UNAVAILABLE. 0 means no limit, as before.
 - New: `TlsConfig.denyCertificate(fingerprint)` refuses a certificate in the handshake (there is still no CRL or OCSP).
