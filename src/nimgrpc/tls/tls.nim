@@ -33,6 +33,8 @@ proc gtls_conf_add_ca(c: GtlsConfP; pem: ptr byte; len: csize_t): clong
 proc gtls_conf_set_identity(c: GtlsConfP; chain: ptr byte; chainLen: csize_t;
                             key: ptr byte; keyLen: csize_t): cint
 proc gtls_conf_require_client_cert(c: GtlsConfP; on: cint): cint
+proc gtls_conf_deny_cert(c: GtlsConfP; sha256: ptr byte): cint
+proc gtls_cert_denied(t: GtlsConnP): cint
 proc gtls_conf_set_cipher_order(c: GtlsConfP; order: cint): cint
 proc gtls_conf_set_lifetime(c: GtlsConfP; seconds: cint): cint
 proc gtls_conf_freeze(c: GtlsConfP)
@@ -180,6 +182,34 @@ proc requireClientCert*(c: TlsConfig; on = true) =
   c.checkBuilding()
   if gtls_conf_require_client_cert(c.raw, cint(on)) != 0: c.checkBuilding()
 
+proc denyCertificate*(c: TlsConfig; sha256Fingerprint: string) =
+  ## A peer that presents the certificate with this SHA-256 fingerprint (of its DER) is refused in
+  ## the handshake: its own certificate or any other of the chain it sends. The fingerprint is 64
+  ## hex digits, with or without colons, as `openssl x509 -fingerprint -sha256` prints it and as
+  ## `PeerIdentity.fingerprint` has it. This is the library's answer to revocation: it reads no CRL
+  ## and asks no OCSP responder. The list is part of the configuration, so a change of it needs a
+  ## new config and a new server or channel. Raises TlsError for a text that is not a fingerprint
+  ## and once the configuration is in use.
+  c.checkBuilding()
+  var raw: array[32, byte]
+  var digits = 0
+  for ch in sha256Fingerprint:
+    if ch == ':': continue
+    let v = case ch
+            of '0'..'9': ord(ch) - ord('0')
+            of 'a'..'f': ord(ch) - ord('a') + 10
+            of 'A'..'F': ord(ch) - ord('A') + 10
+            else: -1
+    if v < 0 or digits >= 64:
+      raise newException(TlsError, "not a SHA-256 fingerprint: " & sha256Fingerprint)
+    raw[digits div 2] = byte((int(raw[digits div 2]) shl 4) or v)
+    inc digits
+  if digits != 64:
+    raise newException(TlsError, "not a SHA-256 fingerprint: " & sha256Fingerprint)
+  if gtls_conf_deny_cert(c.raw, raw[0].addr) != 0:
+    c.checkBuilding()
+    c.fail("deny list")
+
 proc tlsClientConfig*(caPem: string; certChainPem = ""; privateKeyPem = "";
                       cipherOrder = coAuto): TlsConfig =
   ## A client trusting `caPem`; with a chain and key it also authenticates itself. The config comes
@@ -220,6 +250,7 @@ proc errorMessage*(t: TlsConn): string =
   ## Why the session failed, from BearSSL's error code.
   let e = gtls_last_error(t.raw).int
   if gtls_alpn_refused(t.raw) != 0: return "peer did not negotiate ALPN h2"
+  if gtls_cert_denied(t.raw) != 0: return "TLS: the peer's certificate is on the deny list"
   case e
   of 0: "TLS session closed"
   of 3, 4: "TLS: unsupported protocol version (TLS 1.2 is required)"
@@ -252,7 +283,8 @@ proc settle(t: TlsConn) =
       t.why = "peer did not negotiate ALPN h2"
     elif gtls_peer_ok(t.raw) == 0:
       t.peer = psFailed
-      t.why = "peer did not present a trusted certificate"
+      t.why = if gtls_cert_denied(t.raw) != 0: "TLS: the peer's certificate is on the deny list"
+              else: "peer did not present a trusted certificate"
     else:
       t.peer = psVerified
   elif t.isClosed and gtls_last_error(t.raw) != 0:
@@ -332,3 +364,8 @@ proc pullRecords*(t: TlsConn): seq[byte] =
     if n == 0: break
 
 proc close*(t: TlsConn) = gtls_close(t.raw)
+
+when defined(gtlsProbe):
+  # Tests only (tests/tcryptoimpl.nim, which also compiles gtls.c with -DGTLS_PROBE).
+  proc gtls_probe(t: GtlsConnP; what: cstring): cstring {.importc, cdecl.}
+  proc implementationOf*(t: TlsConn; what: string): string = $gtls_probe(t.raw, what.cstring)

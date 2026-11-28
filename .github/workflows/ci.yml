@@ -12,17 +12,27 @@ permissions:
 env:
   NGHTTP2_VERSION: 1.71.0
   NGHTTP2_SHA256: c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116
+  # nim-lang.org has no linux arm64 binary: this one is built once from the release source by
+  # https://github.com/zystem/Nim/tree/arm64-binaries (Nim 2.4.0, the only version of the arm64 job)
+  NIM_ARM64_SHA256: 1524ab802ab20ff5abd812af3e7aa2d0541426c3c1b0e91001ee37125308082f
 
 jobs:
   test:
-    name: tests (${{ matrix.mode }}, Nim ${{ matrix.nim }})
-    runs-on: ubuntu-latest
+    name: tests (${{ matrix.mode }}, Nim ${{ matrix.nim }}${{ matrix.runner == 'ubuntu-24.04-arm' && ', arm64' || '' }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         mode: [plain, asan, coverage]
         # the oldest Nim that nimgrpc.nimble allows, the last 2.2 and the current stable one
         nim: ["2.2.12", "2.2.14", "2.4.0"]
+        runner: [ubuntu-latest]
+        include:
+          # arm64: the other CPU the library is likely to meet; BearSSL picks other code there.
+          # Its compiler is the binary of NIM_ARM64_SHA256 above.
+          - mode: plain
+            nim: "2.4.0"
+            runner: ubuntu-24.04-arm
         exclude:
           - mode: coverage          # one Nim version is enough for the coverage figure
             nim: "2.2.14"
@@ -39,7 +49,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /opt/nghttp2
-          key: nghttp2-${{ env.NGHTTP2_VERSION }}-${{ runner.os }}
+          key: nghttp2-${{ env.NGHTTP2_VERSION }}-${{ runner.os }}-${{ runner.arch }}
       - name: Build nghttp2 (static, as docs/building.md)
         if: steps.ng.outputs.cache-hit != 'true'
         run: |
@@ -53,9 +63,21 @@ jobs:
           cmake --build build -j
           sudo cmake --install build
       - uses: jiro4989/setup-nim-action@08957181dc5baf5f8446497598f798020a03e66a # v2.5.1
+        if: runner.arch != 'ARM64'
         with:
           nim-version: ${{ matrix.nim }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Nim for arm64
+        if: runner.arch == 'ARM64'
+        env:
+          NIM_VERSION: ${{ matrix.nim }}
+        run: |
+          file="nim-${NIM_VERSION}-linux_arm64.tar.xz"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "https://github.com/zystem/Nim/releases/download/arm64-nim-${NIM_VERSION}/${file}"
+          echo "${NIM_ARM64_SHA256}  ${file}" | sha256sum -c -
+          tar -xJf "$file"
+          echo "$RUNNER_TEMP/nim-${NIM_VERSION}/bin" >> "$GITHUB_PATH"
       - run: nimble install -y --depsOnly
       - name: Style and warnings (nimble lint)
         if: matrix.mode == 'plain'
