@@ -236,6 +236,8 @@ typedef struct {
     br_ec_private_key ec;
     unsigned char *key_mem;        /* owns the key's byte arrays */
     int require_client_cert;
+    unsigned char (*deny)[32];     /* SHA-256 of certificates a peer may not present */
+    size_t deny_num;
     int cipher_order;              /* 0: by the CPU, 1: AES-GCM first, 2: ChaCha20 first */
     int lifetime;                  /* seconds a session may be resumed; 0: never */
     int refs;                      /* owners: the TlsConfig handles and the connections made from it (atomic) */
@@ -278,6 +280,16 @@ void gtls_conf_freeze(gtls_conf *c) {
 int gtls_conf_frozen(gtls_conf *c) { return __atomic_load_n(&c->frozen, __ATOMIC_ACQUIRE); }
 
 /* The setters return -1 on a frozen configuration, and then write nothing, not even the error text (another thread may be reading it). */
+int gtls_conf_deny_cert(gtls_conf *c, const unsigned char *sha256) {
+    if (gtls_conf_frozen(c)) return -1;
+    unsigned char (*d)[32] = realloc(c->deny, (c->deny_num + 1) * sizeof *d);
+    if (!d) { strcpy(g_err, "out of memory"); return -1; }
+    memcpy(d[c->deny_num], sha256, 32);
+    c->deny = d;
+    c->deny_num++;
+    return 0;
+}
+
 int gtls_conf_set_cipher_order(gtls_conf *c, int order) {
     if (gtls_conf_frozen(c)) return -1;
     c->cipher_order = order;
@@ -502,6 +514,7 @@ static void cache_free(struct gtls_cache *k);
 static void conf_destroy(gtls_conf *c) {
     for (size_t i = 0; i < c->ta_num; i++) free_ta(&c->tas[i]);
     free(c->tas);
+    free(c->deny);
     cache_free(c->cache);
     pthread_mutex_destroy(&c->mu);
     for (size_t i = 0; i < c->chain_len; i++) free(c->chain[i].data);
@@ -549,6 +562,12 @@ typedef struct {
     size_t leaf_len, leaf_cap;
     int leaf_bad;                  /* the leaf was too large to keep */
     int capture;                   /* keep the leaf for the application too (a server that asks for client certificates) */
+    /* The deny list of the configuration (read-only by now): every certificate the peer
+     * presents, the leaf and any other of the chain, is hashed and looked up. */
+    const unsigned char (*deny)[32];
+    size_t deny_num;
+    br_sha256_context sha;
+    int denied;                    /* a certificate of this chain is on the list */
 } x509_watch;
 
 /* ---- the iPAddress entries of a certificate (DER, just enough of it) */
@@ -625,15 +644,18 @@ static void xw_start_chain(const br_x509_class **ctx, const char *name) {
     w->cert_idx = -1;
     w->leaf_len = 0;
     w->leaf_bad = 0;
+    w->denied = 0;
     (*w->inner)->start_chain(w->inner, name);
 }
 static void xw_start_cert(const br_x509_class **ctx, uint32_t len) {
     x509_watch *w = (x509_watch *)ctx;
     w->cert_idx++;
+    if (w->deny_num) br_sha256_init(&w->sha);
     (*w->inner)->start_cert(w->inner, len);
 }
 static void xw_append(const br_x509_class **ctx, const unsigned char *buf, size_t len) {
     x509_watch *w = (x509_watch *)ctx;
+    if (w->deny_num) br_sha256_update(&w->sha, buf, len);
     if ((w->want_ip || w->capture) && w->cert_idx == 0 && !w->leaf_bad) {
         if (w->leaf_len + len > LEAF_MAX) {
             w->leaf_bad = 1;
@@ -652,6 +674,12 @@ static void xw_append(const br_x509_class **ctx, const unsigned char *buf, size_
 }
 static void xw_end_cert(const br_x509_class **ctx) {
     x509_watch *w = (x509_watch *)ctx;
+    if (w->deny_num) {
+        unsigned char h[32];
+        br_sha256_out(&w->sha, h);
+        for (size_t i = 0; i < w->deny_num; i++)
+            if (memcmp(w->deny[i], h, sizeof h) == 0) w->denied = 1;
+    }
     (*w->inner)->end_cert(w->inner);
 }
 static unsigned xw_end_chain(const br_x509_class **ctx) {
@@ -664,6 +692,7 @@ static unsigned xw_end_chain(const br_x509_class **ctx) {
      * identity to give the application: refused, not accepted without one. */
     if (r == 0 && w->capture && (w->leaf_bad || w->leaf_len == 0))
         r = BR_ERR_X509_LIMIT_EXCEEDED;
+    if (w->denied) r = BR_ERR_X509_NOT_TRUSTED;
     w->validated = (r == 0);
     return r;
 }
@@ -977,6 +1006,8 @@ static void setup_common(gtls_conn *t, gtls_conf *c) {
     t->watch.vtable = &x509_watch_vtable;
     t->watch.inner = &t->x509.vtable;
     br_ssl_engine_set_x509(t->eng, &t->watch.vtable);
+    t->watch.deny = (const unsigned char (*)[32])c->deny;
+    t->watch.deny_num = c->deny_num;
     br_ssl_engine_set_buffer(t->eng, t->iobuf, sizeof t->iobuf, 1);
     br_ssl_engine_set_versions(t->eng, BR_TLS12, BR_TLS12);
     t->alpn[0] = h2_name;
@@ -1092,6 +1123,51 @@ void gtls_free(gtls_conn *t) {
     }
 }
 
+#ifdef GTLS_PROBE
+/* Tests only (tests/tcryptoimpl.nim): the name of the BearSSL implementation a connection uses
+ * for secret data. "unknown" for anything that is not in the list. */
+#define PROBE(p, sym) if ((const void *)(p) == (const void *)(&sym)) return #sym
+const char *gtls_probe(gtls_conn *t, const char *what) {
+    br_ssl_engine_context *e = t->eng;
+    if (strcmp(what, "aes") == 0) {
+#if defined(__x86_64__)
+        PROBE(e->iaes_ctr, br_aes_x86ni_ctr_vtable);
+#endif
+        PROBE(e->iaes_ctr, br_aes_ct64_ctr_vtable);
+        PROBE(e->iaes_ctr, br_aes_ct_ctr_vtable);
+        PROBE(e->iaes_ctr, br_aes_big_ctr_vtable);
+        PROBE(e->iaes_ctr, br_aes_small_ctr_vtable);
+    } else if (strcmp(what, "ghash") == 0) {
+        if (e->ighash == br_ghash_pclmul_get() && e->ighash) return "br_ghash_pclmul";
+        PROBE(e->ighash, br_ghash_ctmul64);
+        PROBE(e->ighash, br_ghash_ctmul32);
+        PROBE(e->ighash, br_ghash_ctmul);
+    } else if (strcmp(what, "chacha20") == 0) {
+        if (e->ichacha == br_chacha20_sse2_get() && e->ichacha) return "br_chacha20_sse2";
+        PROBE(e->ichacha, br_chacha20_ct_run);
+    } else if (strcmp(what, "poly1305") == 0) {
+        if (e->ipoly == br_poly1305_ctmulq_get() && e->ipoly) return "br_poly1305_ctmulq";
+        PROBE(e->ipoly, br_poly1305_ctmul32_run);
+        PROBE(e->ipoly, br_poly1305_ctmul_run);
+    } else if (strcmp(what, "ec") == 0) {
+        PROBE(e->iec, ec_fast);
+    } else if (strcmp(what, "p256") == 0) {
+        if (!ec_p256_fast) return "br_ec_all_m31";
+        if (ec_p256_fast == br_ec_p256_m64_get()) return "br_ec_p256_m64";
+    } else if (strcmp(what, "rsa-private") == 0) {
+        br_rsa_private f = br_rsa_private_get_default();
+        if (f == br_rsa_i62_private_get() && f) return "br_rsa_i62_private";
+        if (f == &br_rsa_i31_private) return "br_rsa_i31_private";
+        if (f == &br_rsa_i15_private) return "br_rsa_i15_private";
+    } else if (strcmp(what, "ecdsa-sign") == 0) {
+        br_ecdsa_sign f = br_ecdsa_sign_asn1_get_default();
+        if (f == &br_ecdsa_i31_sign_asn1) return "br_ecdsa_i31_sign_asn1";
+        if (f == &br_ecdsa_i15_sign_asn1) return "br_ecdsa_i15_sign_asn1";
+    }
+    return "unknown";
+}
+#endif
+
 /* ------------------------------------------------------------------ pump */
 
 enum {
@@ -1102,6 +1178,8 @@ enum {
 unsigned gtls_state(gtls_conn *t) { return br_ssl_engine_current_state(t->eng); }
 /* 1 if a server refused the client because it offered no ALPN protocol. */
 int gtls_alpn_refused(gtls_conn *t) { return t->alpn_refused; }
+/* 1 if the peer presented a certificate of the deny list. */
+int gtls_cert_denied(gtls_conn *t) { return t->watch.denied; }
 int gtls_last_error(gtls_conn *t) { return br_ssl_engine_last_error(t->eng); }
 
 /* Records from the network. Returns bytes taken (0 if the engine wants none now). */

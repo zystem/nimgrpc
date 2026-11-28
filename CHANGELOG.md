@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+- **Two limits of a server are on by default** (what the audits of 2026-11-21 and 2026-11-22 left open): `Limits.maxConnections` is 4096 (was 0, no limit) and `Limits.maxConnectionIdleMs` is 15 minutes (was 0, never). 0 still means no limit. Left off, because they would cut or refuse long streams that are meant to stay open: `maxCallMs`, `maxStreamingCalls`, `maxConnectionAgeMs`, `pingPolicy`, and `maxConnectionsPerIp` (which a proxy makes wrong). See [docs/upgrading.md](docs/upgrading.md).
+
+### Added
+- CI runs the tests on arm64 too (Ubuntu 24.04, Nim 2.4.0).
+- `tests/tcryptoimpl.nim`: a connection must pick, for the data that is secret (AES, GHASH, ChaCha20, Poly1305, the elliptic curves, the RSA and ECDSA private operations), an implementation that BearSSL writes to run in constant time. It looks at the choice, not at what the compiler made of it, and measures no time.
+- **A deny list of certificates**, the answer to revocation that the audit of 2026-11-22 found missing: `TlsConfig.denyCertificate(sha256Fingerprint)`. A peer, client or server, that presents a certificate of the list, as its own or as another certificate of its chain, is refused in the handshake ("TLS: the peer's certificate is on the deny list"). It is not CRL or OCSP checking: the program keeps the list. It is part of the config, which cannot change once in use, so a new entry needs a new config and server. Tests: `tests/ttls.nim`, suite "the deny list" (five of seven fail without the check in `gtls.c`).
+
 ## 0.8.0 — 2026-11-27
 
 ### Security

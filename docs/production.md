@@ -48,10 +48,15 @@ measured in a large deployment ([security-requirements.md](security-requirements
       configs: a session never crosses configs, and every config has its own trust anchors.
 - [ ] Renewal: there is no reload. A new certificate needs a new server, so plan a restart
       (`stop(graceMs)`) before the old one ends, and watch the end date from outside.
-- [ ] Revocation is not checked (no CRL, no OCSP). To cut a client off, change the CA or
-      refuse it by name (`ctx.peer`, its fingerprint say) in an interceptor. **Session resumption** keeps a peer that holds a
-      session for ten minutes without a new certificate check: `setSessionLifetime(0)` turns
-      it off.
+- [ ] **Revocation**: no CRL is read and no OCSP responder asked. A certificate that must not be
+      accepted any more goes on the deny list of the config by its SHA-256 fingerprint
+      (`denyCertificate`; `openssl x509 -in cert.pem -noout -fingerprint -sha256`, or
+      `ctx.peer.fingerprint`): the handshake with it is refused, whether it is the peer's own
+      certificate or another of the chain it sends (a revoked intermediate). The list is part of the
+      config: a change of it needs a new config and a new server, and ends the sessions that the old
+      one could resume. To refuse by name in a running server, use an interceptor (`ctx.peer`):
+      **session resumption** keeps a peer that holds a session for ten minutes without a new
+      certificate check (`setSessionLifetime(0)` turns it off).
 - [ ] Mutual TLS (`clientCaPem`) admits a client whose certificate the CA signed. Which client it
       is, the handler and the interceptor read from `ctx.peer`: authorization is still the
       program's job.
@@ -79,15 +84,17 @@ Set by default; `ClientLimits` goes to `dial` and `dialAsync`.
 
 **Dangerous when left at the default**: these are off (0, no limit) unless set.
 
-- [ ] `Limits.maxConnections`: connections at once. No limit by default.
 - [ ] `Limits.maxConnectionsPerIp`: where clients connect directly. No limit by default.
 - [ ] `Limits.maxCallMs`: the longest a call may last. No limit by default; set it unless
       calls are meant to stay open.
-- [ ] `Limits.maxConnectionIdleMs`, `maxConnectionAgeMs`: close idle and old connections. Off
-      by default.
+- [ ] `Limits.maxConnectionAgeMs`: close old connections. Off by default.
 
 Set by default, check that they suit you:
 
+- [ ] `Limits.maxConnections` (4096 connections at once): set what the machine can carry; the
+      blocking server uses two threads for each.
+- [ ] `Limits.maxConnectionIdleMs` (15 minutes): a connection with no call for that long is closed;
+      a channel dials again at its next call.
 - [ ] `maxMessage` (4 MiB), `Limits.maxConcurrentStreams` (100 per connection),
       `handshakeTimeoutMs` (20 s), `maxConnectionBuffer` (16 MiB).
 - [ ] Blocking server: `maxWorkers` (256 calls at once) and `Limits.maxQueuedCalls` (1024 calls

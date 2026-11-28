@@ -6,6 +6,10 @@ General steps: update the package (`nimble install nimgrpc@X.Y.Z` or the new com
 
 ## Unreleased
 
+- **A server serves at most 4096 connections at once** (`Limits.maxConnections`; before, no limit). One more is closed as soon as it is accepted. A server with more clients raises it; 0 means no limit.
+- **A server closes a connection with no call for 15 minutes** (`Limits.maxConnectionIdleMs`; before, never): GOAWAY, then the close. A channel of this library, and of gRPC, dials again at its next call; a connection with a call open is not idle. A streaming call that is started in the very moment of the GOAWAY fails with UNAVAILABLE. 0 means no limit, as before.
+- New: `TlsConfig.denyCertificate(fingerprint)` refuses a certificate in the handshake (there is still no CRL or OCSP).
+
 ## 0.8.0
 
 - **Upgrade if you use TLS**: with every earlier release a peer that does not read could make one TLS connection take hundreds of megabytes of memory ([GHSA-6p4v-6g7c-g9hv](https://github.com/zystem/nimgrpc/security/advisories/GHSA-6p4v-6g7c-g9hv); see "Security" in [../CHANGELOG.md](../CHANGELOG.md)). Nothing to change in your code for it. The number is 0.8 because of the new defaults and the stricter `TlsConfig` below.

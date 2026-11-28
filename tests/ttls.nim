@@ -1,8 +1,9 @@
 ## TLS and mutual TLS.
 
-import std/[unittest, os, osproc, strutils, net, streams]
+import std/[unittest, os, osproc, strutils, net, streams, base64]
 import nimgrpc
 import nimgrpc/tls/tls as rawtls
+import nimgrpc/tls/peerid
 import ./interop/interop
 
 const certs = currentSourcePath.parentDir / "certs"
@@ -636,3 +637,86 @@ suite "the pump takes only the memory it fills":
     p.c.pullApp(plain)
     check plain == sent[0 ..< taken]
     check plain.capacity <= plain.len + slack
+
+proc fingerprintOf(certPem: string): string =
+  ## The SHA-256 fingerprint of the first certificate of a PEM text.
+  var body = ""
+  var inside = false
+  for l in certPem.splitLines:
+    if l.startsWith("-----BEGIN"): inside = true
+    elif l.startsWith("-----END"): break
+    elif inside: body.add l
+  parsePeerCert(base64.decode(body).toOpenArrayByte(0, base64.decode(body).high)).fingerprint
+
+suite "the deny list":
+  proc server(deny: openArray[string]; identity = pem"server.pem"): TlsConfig =
+    result = tlsServerConfig(identity, pem"server.key", clientCaPem = pem"ca.pem")
+    for f in deny: result.denyCertificate(f)
+
+  proc client(deny: openArray[string] = []): TlsConfig =
+    result = tlsClientConfig(pem"ca.pem", pem"client.pem", pem"client.key")
+    for f in deny: result.denyCertificate(f)
+
+  proc why(t: TlsConn): string =
+    try: t.checkPeer()
+    except TlsError as e: return e.msg
+    ""
+
+  test "a server refuses a client whose certificate is on the list, every time":
+    let sc = server([fingerprintOf(pem"client.pem")])
+    let cc = client()
+    for _ in 0 ..< 2:                      # the second time: no session was kept to resume
+      let a = connect(cc, sc)
+      check "deny list" in why(a.s)
+      check not a.s.resumed
+      var got: seq[byte]
+      try: a.s.pullApp(got)
+      except TlsError: discard
+      check got.len == 0
+
+  test "a client that is not on the list is let in, and its session resumes":
+    let sc = server([fingerprintOf(pem"server.pem")])      # some other certificate
+    let cc = client()
+    let a = connect(cc, sc)
+    check why(a.s) == "" and why(a.c) == ""
+    a.s.feed(a.c.pullRecords())
+    let b = connect(cc, sc)
+    check why(b.s) == "" and b.s.resumed
+
+  test "a client refuses a server whose certificate is on the list":
+    let a = connect(client([fingerprintOf(pem"server.pem")]), server([]))
+    check "deny list" in why(a.c)
+
+  test "a certificate of the chain other than the first one counts too":
+    let chain = pem"server.pem" & pem"ca.pem"
+    let ok = connect(client([fingerprintOf(pem"otherca.pem")]), server([], chain))
+    check why(ok.c) == ""
+    let a = connect(client([fingerprintOf(pem"ca.pem")]), server([], chain))
+    check "deny list" in why(a.c)
+
+  test "a fingerprint as openssl prints it is the same; other text is refused":
+    let f = fingerprintOf(pem"client.pem").toUpperAscii
+    var colons = ""
+    for i in countup(0, 62, 2):
+      if i > 0: colons.add ':'
+      colons.add f[i .. i + 1]
+    let a = connect(client(), server([colons]))
+    check "deny list" in why(a.s)
+    for bad in ["", "ab", f[0 .. 62], f & "0", "zz" & f[2 .. ^1], "SHA256:" & f]:
+      let c = newTlsConfig()
+      expect TlsError: c.denyCertificate(bad)
+
+  test "the list cannot change once the configuration is in use":
+    let sc = server([])
+    discard newServerTls(sc)
+    expect TlsError: sc.denyCertificate(fingerprintOf(pem"client.pem"))
+
+  test "a gRPC call of a denied client fails, on a server that serves the others":
+    let sc = tlsServerConfig(pem"server.pem", pem"server.key", clientCaPem = pem"ca.pem")
+    sc.denyCertificate(fingerprintOf(pem"client.pem"))
+    let srv = newTestServer(tls = sc)
+    srv.start()
+    let ch = dial("127.0.0.1", srv.port, client(), "localhost")
+    check "scUnavailable" in expectFailure(proc () = ch.echoOnce())
+    ch.close()
+    srv.stop()

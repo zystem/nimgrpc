@@ -36,7 +36,8 @@ nimble installs the newest.
 |---|---|
 | Linux x86-64, glibc | run: CI (GitHub's `ubuntu-latest`) on every pull request; Linux Mint 22.3, kernel 6.8, on 2026-11-15 |
 | Linux x86-64, musl, static | run by hand, client only ([static-build.md](static-build.md)) |
-| Linux on other CPUs (arm64 and others) | not run |
+| Linux on arm64 | the test suite in CI on every pull request (Ubuntu 24.04, Nim 2.4.0, built from source); the sanitizers, the soak and the benchmarks: not run |
+| Linux on other CPUs | not run |
 | macOS, the BSDs | not run |
 | Windows | not run; the blocking adapter uses POSIX calls |
 

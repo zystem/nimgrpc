@@ -33,3 +33,4 @@ nimcache/
 /examples/greeter/*
 !/examples/greeter/*.nim
 !/examples/greeter/*.proto
+!/tests/*.cfg

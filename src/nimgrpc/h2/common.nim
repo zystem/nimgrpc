@@ -40,9 +40,10 @@ type
       ## Streams a client may have open at once on one connection (announced
       ## as SETTINGS_MAX_CONCURRENT_STREAMS; one more is refused with
       ## REFUSED_STREAM). 0 leaves nghttp2's default, which is no limit.
-    maxConnections*: int = 0
+    maxConnections*: int = 4096
       ## Connections served at once; a connection past the limit is closed
-      ## at once. 0 means no limit.
+      ## at once. The blocking server uses two threads for each one: set what the machine and
+      ## the memory can carry. 0 means no limit.
     maxConnectionsPerIp*: int = 0
       ## Connections served at once from one address; one more from it is closed at once. It
       ## keeps a single client from taking every connection (and, on the blocking server, the
@@ -61,8 +62,11 @@ type
       ## After the GOAWAY of `maxConnectionAgeMs` or `maxConnectionIdleMs`, calls that are still
       ## running get this long; then the connection is closed and they are cancelled. 0 waits
       ## for them for ever.
-    maxConnectionIdleMs*: int = 0
-      ## A connection with no call in progress for this long gets GOAWAY and is closed. 0 means
+    maxConnectionIdleMs*: int = 15 * 60 * 1000
+      ## A connection with no call in progress for this long (15 minutes by default) gets GOAWAY
+      ## and is closed; a channel dials again at its next call. Keepalive PINGs are not calls. A
+      ## connection with a call open, a stream that is quiet included, is not idle. It frees the
+      ## places of `maxConnections` that clients that went away or only connected hold. 0 means
       ## no limit.
     maxCallMs*: int = 0
       ## The longest a call may last, whatever deadline the client asked for (and when it asked
